@@ -15,12 +15,12 @@ st.set_page_config(page_title="Masterfile Automation", page_icon="📦", layout=
 def norm(s: str) -> str:
     if s is None:
         return ""
-    x = str(s).strip().lower()
+    x = str(s).replace("\xa0", " ").strip().lower()  # kill NBSPs too
     x = re.sub(r"\s*-\s*en\s*[-_ ]\s*us\s*$", "", x)
     x = x.replace("–", "-").replace("—", "-").replace("−", "-")
-    x = re.sub(r"[._/\\-]+", " ", x)           # separators -> space
-    x = re.sub(r"[^0-9a-z\s]+", " ", x)        # keep alnum/space
-    return re.sub(r"\s+", " ", x).strip()      # collapse spaces
+    x = re.sub(r"[._/\\-]+", " ", x)
+    x = re.sub(r"[^0-9a-z\s]+", " ", x)
+    return re.sub(r"\s+", " ", x).strip()
 
 def top_matches(query, candidates, k=3):
     q = norm(query)
@@ -47,31 +47,59 @@ def worksheet_used_cols(ws, header_rows=(1,), hard_cap=512, empty_streak_stop=8)
                 break
     return max(last_nonempty, 1)
 
-def uniquify_headers(headers):
-    seen = {}
-    out = []
-    for h in headers:
-        h = "" if h is None else str(h)
-        if h in seen:
-            seen[h] += 1
-            out.append(f"{h}__{seen[h]}")
+def clean_header_row(raw_row):
+    """Return list of header strings (trim NBSP etc.)."""
+    headers = []
+    for v in raw_row.tolist():
+        if v is None:
+            headers.append("")
         else:
-            seen[h] = 0
-            out.append(h)
-    return out
+            headers.append(str(v).replace("\xa0", " ").strip())
+    return headers
+
+def build_on_df_from_raw(raw_df, header_row_index):
+    """
+    - Take pandas DataFrame with no header (header=None).
+    - header_row_index is 0-based index pointing to the header row.
+    - Clean headers: trim, remove blanks, drop duplicates (by normalized key).
+    - Return a new DataFrame with these cleaned headers and only kept columns.
+    """
+    # Extract & clean candidate headers
+    headers_raw = clean_header_row(raw_df.iloc[header_row_index])
+    keep_indices = []
+    keep_names = []
+    seen_norm = set()
+
+    for idx, h in enumerate(headers_raw):
+        hn = norm(h)
+        if not hn:                      # drop truly blank
+            continue
+        if hn in seen_norm:             # drop duplicates by normalized name
+            continue
+        seen_norm.add(hn)
+        keep_indices.append(idx)
+        keep_names.append(h if h else f"col_{idx+1}")
+
+    # Build DF with only kept columns; data is everything after the header row
+    df = raw_df.iloc[header_row_index + 1:, keep_indices].copy()
+    df.columns = keep_names
+    df = df.fillna("")
+    return df, keep_names
 
 # sentinel for “Listing Action”
 SENTINEL_LISTING_ACTION = object()
 
 # ---------------- UI ----------------
 st.title("📦 Masterfile Automation")
-st.caption("Auto-detect or choose onboarding header row. Only writes rows that actually contain data.")
+st.caption("Auto-detect or choose onboarding header row. Cleans headers (drops blanks/duplicates) and writes only rows that contain data.")
 
 with st.expander("ℹ️ Quick guide", expanded=True):
     st.markdown("""
-- **Masterfile**: Row 1 = labels, Row 2 = keys, data starts Row 3 (styles preserved).
-- **Onboarding**: You can **Auto-detect** the header row or **pick it manually** (1-based). Data is below that header row.
-- **Mapping JSON**: keys = master labels; values = list of onboarding aliases in order of priority.
+- **Masterfile**: Row **1** = labels, Row **2** = keys, data starts **Row 3** (styles preserved).
+- **Onboarding**: Choose **Auto-detect** or **Pick row** for the header row.  
+  The tool **cleans** that row (removes blank/duplicate headers) and uses it for mapping.  
+  Data is **below** the selected header row.
+- **Mapping JSON**: keys = master labels; values = list of onboarding aliases (priority order).
     """)
 
 st.divider()
@@ -149,7 +177,7 @@ if go:
         master_displays = [master_ws.cell(row=1, column=c).value or ""
                            for c in range(1, used_cols + 1)]
 
-        # onboarding raw (no header), then pick header row
+        # onboarding raw (no header), then pick/auto-detect header row
         slog("⏳ Reading onboarding…")
         try:
             raw_df = pd.read_excel(onboarding_file, header=None, dtype=str).fillna("")
@@ -198,39 +226,39 @@ if go:
                         report_lines.append(f"- ❌ **{m_disp}** ← *no match*. Suggestions: {sug}")
             return resolved, master_to_source, chosen_alias, unmatched, report_lines
 
-        # get onboarding df according to header mode
         if header_mode == "Pick a row number":
-            h0 = int(header_row_manual) - 1  # 0-based
+            h0 = int(header_row_manual) - 1
             if h0 < 0 or h0 >= len(raw_df):
                 st.error("Header row number is out of range for this file.")
                 st.stop()
-            headers = uniquify_headers(list(raw_df.iloc[h0].astype(str)))
-            on_df = raw_df.iloc[h0 + 1:].copy()
-            on_df.columns = headers
-            on_df = on_df.fillna("")
-            detected_header_row = h0 + 1
+            on_df, kept_headers = build_on_df_from_raw(raw_df, h0)
             resolved, master_to_source, chosen_alias, unmatched, report = build_mapping(on_df)
+            detected_header_row = h0 + 1
         else:
-            # auto-detect among first up to 10 rows
+            # Auto-detect among first ~10 rows, pick the one that yields most resolved columns
             best = None
             max_try = min(10, len(raw_df) - 1)
             for h0 in range(0, max_try + 1):
-                headers = uniquify_headers(list(raw_df.iloc[h0].astype(str)))
-                candidate = raw_df.iloc[h0 + 1:].copy()
-                candidate.columns = headers
-                candidate = candidate.fillna("")
-
-                resolved, m2s, chosen, unmatch, rep = build_mapping(candidate)
-                nonempty_headers = sum(1 for hh in headers if str(hh).strip())
-                score = (resolved, nonempty_headers)
+                try:
+                    candidate_df, kept_headers = build_on_df_from_raw(raw_df, h0)
+                except Exception:
+                    continue
+                resolved, m2s, chosen, unmatch, rep = build_mapping(candidate_df)
+                score = (resolved, len(kept_headers))
                 if best is None or score > best[0]:
-                    best = ((resolved, nonempty_headers), h0, candidate, m2s, chosen, unmatch, rep)
+                    best = (score, h0, candidate_df, m2s, chosen, unmatch, rep, kept_headers)
 
-            (_, _), h0, on_df, master_to_source, chosen_alias, unmatched, report = best
+            if best is None:
+                st.error("Could not auto-detect a usable header row.")
+                st.stop()
+
+            (_, _), h0, on_df, master_to_source, chosen_alias, unmatched, report, kept_headers = best
             detected_header_row = h0 + 1
 
-        st.info(f"Header row used for onboarding: **Row {detected_header_row}** (1-based). "
-                f"Resolved **{sum(isinstance(v, pd.Series) for v in master_to_source.values())}** columns.")
+        st.info(
+            f"Header row used for onboarding: **Row {detected_header_row}**. "
+            f"Columns kept after cleaning: **{len(on_df.columns)}**"
+        )
 
         st.markdown("#### 🔎 Mapping Summary (Master → Onboarding)")
         st.markdown("\n".join(report))
@@ -247,7 +275,7 @@ if go:
                         return True
             return False
 
-        blank_streak_limit = 50  # hard stop if we see many consecutive blanks
+        blank_streak_limit = 50
         blanks = 0
         written = 0
 
@@ -257,7 +285,7 @@ if go:
                 if blanks >= blank_streak_limit:
                     break
                 continue
-            blanks = 0  # reset once we hit a row with data
+            blanks = 0
             target_row = out_row_start + written
             for c in range(1, used_cols + 1):
                 src = master_to_source.get(c)
