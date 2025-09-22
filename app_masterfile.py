@@ -21,7 +21,7 @@ def norm(s: str) -> str:
     x = str(s).strip().lower()
     # strip "- en-us" & variants
     x = re.sub(r"\s*-\s*en\s*[-_ ]\s*us\s*$", "", x)
-    # normalize different dashes to '-'
+    # normalize dashes
     x = x.replace("–", "-").replace("—", "-").replace("−", "-")
     # replace common separators with a space (keep '-' last in class)
     x = re.sub(r"[._/\\-]+", " ", x)
@@ -59,6 +59,22 @@ def worksheet_used_cols(ws, header_rows=(1,), hard_cap=512, empty_streak_stop=8)
     return max(last_nonempty, 1)
 
 
+def uniquify_headers(headers):
+    """Make duplicate headers unique by adding suffixes."""
+    seen = {}
+    out = []
+    for h in headers:
+        h = "" if h is None else str(h)
+        key = h
+        if key in seen:
+            seen[key] += 1
+            out.append(f"{h}__{seen[key]}")
+        else:
+            seen[key] = 0
+            out.append(h)
+    return out
+
+
 # Unique sentinel for the special "Listing Action" fill
 SENTINEL_LISTING_ACTION = object()
 
@@ -66,7 +82,7 @@ SENTINEL_LISTING_ACTION = object()
 # UI
 # =========================
 st.title("📦 Masterfile Automation")
-st.caption("Upload any onboarding (Row 1 = headers, data from Row 2), your master template (Row 1 labels, Row 2 keys), and mapping JSON. Get a ready-to-upload masterfile.")
+st.caption("Auto-detects onboarding header row. Map onboarding columns to master template headers and generate a ready-to-upload masterfile.")
 
 with st.expander("ℹ️ Quick guide", expanded=True):
     st.markdown("""
@@ -76,13 +92,13 @@ with st.expander("ℹ️ Quick guide", expanded=True):
   - Data is written starting at **Row 3** (template styles are preserved)
 
 - **Onboarding sheet (.xlsx)**  
-  - Row **1** = **attribute headers** (mapped by your JSON)  
-  - Data starts at **Row 2**
+  - The app **auto-detects the header row** (it tries the first 10 rows and picks the one that maps best).  
+  - Data is everything **after** the detected header row.
 
 - **Mapping JSON**  
   - Keys = **Master display headers** (Row 1 in master)  
   - Values = **list of onboarding header aliases** in priority order.  
-  - The **first alias that exists** in the onboarding headers is used.
+  - The **first alias that exists** is used.  
     """)
 
 st.divider()
@@ -149,76 +165,102 @@ if go:
         for k, v in mapping_raw.items():
             MAPPING[norm(k)] = v[:] if isinstance(v, list) else [v]
 
-        slog("⏳ Reading workbooks…")
+        slog("⏳ Reading master (preserving styles)…")
         try:
-            # Read masterfile with openpyxl to preserve template styles
             master_wb = load_workbook(masterfile_file, keep_links=False)
             master_ws = master_wb.active
         except Exception as e:
             st.error(f"Could not read **Masterfile**: {e}")
             st.stop()
 
+        # --- Read onboarding raw (no header) and auto-detect header row ---
+        slog("⏳ Reading onboarding (auto-detecting header row)…")
         try:
-            # Onboarding: Row 1 = headers, data starts at Row 2
-            on_df = pd.read_excel(onboarding_file, header=0, dtype=str)
-            on_df = on_df.fillna("")
+            raw_df = pd.read_excel(onboarding_file, header=None, dtype=str)
+            raw_df = raw_df.fillna("")
         except Exception as e:
             st.error(f"Could not read **Onboarding**: {e}")
             st.stop()
 
-        # Master headers (Row 1 display, Row 2 keys)
+        # Master headers (Row 1 display)
         used_cols = worksheet_used_cols(master_ws, header_rows=(1, 2))
         master_displays = [master_ws.cell(row=1, column=c).value or "" for c in range(1, used_cols + 1)]
 
-        # Onboarding headers and normalization
-        on_headers = list(on_df.columns)
-        if not on_headers:
-            st.error("Onboarding sheet has no headers in Row 1 (the first row). Please check the file.")
+        def build_mapping_for_df(df):
+            """Given an onboarding df with proper headers, build mapping, return stats+details."""
+            on_headers = list(df.columns)
+            series_by_alias = {norm(h): df[h] for h in on_headers}
+
+            master_to_source = {}
+            chosen_alias = {}
+            unmatched = []
+            report = []
+
+            resolved_count = 0
+            for c, m_disp in enumerate(master_displays, start=1):
+                disp_norm = norm(m_disp)
+                aliases = []
+                aliases += MAPPING.get(disp_norm, [])
+                if m_disp:
+                    aliases.append(m_disp)
+
+                resolved_series = None
+                resolved_alias = None
+                for a in aliases:
+                    a_norm = norm(a)
+                    if a_norm in series_by_alias:
+                        resolved_series = series_by_alias[a_norm]
+                        resolved_alias = a
+                        break
+
+                if resolved_series is not None:
+                    master_to_source[c] = resolved_series
+                    chosen_alias[c] = resolved_alias
+                    resolved_count += 1
+                    report.append(f"- ✅ **{m_disp}** ← `{resolved_alias}`")
+                else:
+                    if disp_norm == norm("Listing Action (List or Unlist)"):
+                        master_to_source[c] = SENTINEL_LISTING_ACTION
+                        report.append(f"- 🟨 **{m_disp}** ← (will fill `'List'`)")
+                    else:
+                        unmatched.append(m_disp)
+                        suggestions = top_matches(m_disp, on_headers, 3)
+                        sug_txt = ", ".join(f"`{name}` ({round(sc*100,1)}%)" for sc, name in suggestions) if suggestions else "*none*"
+                        report.append(f"- ❌ **{m_disp}** ← *no match*. Suggestions: {sug_txt}")
+            return resolved_count, master_to_source, chosen_alias, unmatched, report
+
+        # Try header rows 0..9 (first 10 rows)
+        best = None
+        best_header_row = None
+        max_try = min(10, len(raw_df)-1)
+        for h in range(0, max_try+1):
+            headers = list(raw_df.iloc[h].astype(str))
+            headers = ["" if x.lower() == "nan" else x for x in headers]
+            headers = uniquify_headers(headers)
+            candidate_df = raw_df.iloc[h+1:].copy()
+            candidate_df.columns = headers
+            candidate_df = candidate_df.fillna("")
+
+            resolved_count, m2s, chosen, unmatch, rep = build_mapping_for_df(candidate_df)
+
+            # score by resolved columns; tiebreaker = number of non-empty headers
+            nonempty_headers = sum(1 for hh in headers if str(hh).strip())
+            score = (resolved_count, nonempty_headers)
+
+            if (best is None) or (score > best[0]):
+                best = ((resolved_count, nonempty_headers), m2s, chosen, unmatch, rep, candidate_df)
+                best_header_row = h
+
+        if best is None:
+            st.error("Could not detect a valid header row in onboarding.")
             st.stop()
 
-        series_by_alias = {norm(h): on_df[h] for h in on_headers}
+        (resolved_count, _), master_to_source, chosen_alias, unmatched, report_lines, on_df = best
 
-        # Build master -> onboarding series map
-        master_to_source = {}   # col -> Series or SENTINEL_LISTING_ACTION
-        chosen_alias = {}       # col -> alias actually used (for reporting)
-        unmatched = []
-        report_lines = []
+        st.info(f"✅ Detected onboarding header row: **Row {best_header_row+1}** (1-based). "
+                f"Resolved **{resolved_count}** master columns.")
 
-        report_lines.append("#### 🔎 Mapping Summary (Master → Onboarding)")
-        for c, m_disp in enumerate(master_displays, start=1):
-            disp_norm = norm(m_disp)
-            aliases = []
-            # mapping by master display
-            aliases += MAPPING.get(disp_norm, [])
-            # fallback: allow exact display header as an alias too
-            if m_disp:
-                aliases.append(m_disp)
-
-            resolved_series = None
-            resolved_alias = None
-            for a in aliases:
-                a_norm = norm(a)
-                if a_norm in series_by_alias:
-                    resolved_series = series_by_alias[a_norm]
-                    resolved_alias = a
-                    break
-
-            if resolved_series is not None:
-                master_to_source[c] = resolved_series
-                chosen_alias[c] = resolved_alias
-                report_lines.append(f"- ✅ **{m_disp}** ← `{resolved_alias}`")
-            else:
-                # Special case: Listing Action
-                if disp_norm == norm("Listing Action (List or Unlist)"):
-                    master_to_source[c] = SENTINEL_LISTING_ACTION
-                    report_lines.append(f"- 🟨 **{m_disp}** ← (will fill `'List'`)")
-                else:
-                    unmatched.append(m_disp)
-                    # suggestions from onboarding headers
-                    suggestions = top_matches(m_disp, on_headers, 3)
-                    sug_txt = ", ".join(f"`{name}` ({round(sc*100,1)}%)" for sc, name in suggestions) if suggestions else "*none*"
-                    report_lines.append(f"- ❌ **{m_disp}** ← *no match*. Suggestions: {sug_txt}")
-
+        st.markdown("#### 🔎 Mapping Summary (Master → Onboarding)")
         st.markdown("\n".join(report_lines))
 
         # Write values to master starting row 3
