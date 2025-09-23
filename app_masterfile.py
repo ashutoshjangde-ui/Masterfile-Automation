@@ -4,6 +4,7 @@ import io
 import json
 import re
 from difflib import SequenceMatcher
+from textwrap import dedent
 
 import pandas as pd
 import streamlit as st
@@ -11,16 +12,25 @@ from openpyxl import load_workbook
 
 st.set_page_config(page_title="Masterfile Automation", page_icon="📦", layout="wide")
 
-# ---------------- Helpers ----------------
+# =========================
+# Helpers
+# =========================
 def norm(s: str) -> str:
+    """Normalize header strings for robust matching."""
     if s is None:
         return ""
-    x = str(s).replace("\xa0", " ").strip().lower()  # kill NBSPs too
+    x = str(s).strip().lower()
+    # strip "- en-us" & variants
     x = re.sub(r"\s*-\s*en\s*[-_ ]\s*us\s*$", "", x)
+    # normalize dashes
     x = x.replace("–", "-").replace("—", "-").replace("−", "-")
+    # replace common separators with a space (keep '-' last in class)
     x = re.sub(r"[._/\\-]+", " ", x)
+    # drop anything not alnum or space
     x = re.sub(r"[^0-9a-z\s]+", " ", x)
+    # collapse spaces
     return re.sub(r"\s+", " ", x).strip()
+
 
 def top_matches(query, candidates, k=3):
     q = norm(query)
@@ -28,7 +38,9 @@ def top_matches(query, candidates, k=3):
     scored.sort(key=lambda t: t[0], reverse=True)
     return scored[:k]
 
+
 def worksheet_used_cols(ws, header_rows=(1,), hard_cap=512, empty_streak_stop=8):
+    """Heuristically detect meaningful column span by scanning header rows."""
     max_try = min(ws.max_column, hard_cap)
     last_nonempty, streak = 0, 0
     for c in range(1, max_try + 1):
@@ -47,262 +59,260 @@ def worksheet_used_cols(ws, header_rows=(1,), hard_cap=512, empty_streak_stop=8)
                 break
     return max(last_nonempty, 1)
 
-def clean_header_row(raw_row):
-    """Return list of header strings (trim NBSP etc.)."""
-    headers = []
-    for v in raw_row.tolist():
-        if v is None:
-            headers.append("")
-        else:
-            headers.append(str(v).replace("\xa0", " ").strip())
-    return headers
 
-def build_on_df_from_raw(raw_df, header_row_index):
+def nonempty_rows(df: pd.DataFrame) -> int:
+    """Count rows that have at least one non-empty cell."""
+    if df.empty:
+        return 0
+    tmp = df.replace("", pd.NA)
+    return tmp.dropna(how="all").shape[0]
+
+
+def pick_best_onboarding_sheet(uploaded_file, mapping_aliases_by_master):
     """
-    - Take pandas DataFrame with no header (header=None).
-    - header_row_index is 0-based index pointing to the header row.
-    - Clean headers: trim, remove blanks, drop duplicates (by normalized key).
-    - Return a new DataFrame with these cleaned headers and only kept columns.
+    Inspect all sheets and pick the best one:
+    - Row 1 is treated as headers
+    - Row 2+ as data
+    - Score = number of mapping keys that find at least one alias in the sheet headers
+              + small tie-breaker for non-empty data rows
+    Returns (best_df, best_sheet_name, debug_info)
     """
-    # Extract & clean candidate headers
-    headers_raw = clean_header_row(raw_df.iloc[header_row_index])
-    keep_indices = []
-    keep_names = []
-    seen_norm = set()
+    # Read the Excel once to list sheets
+    uploaded_file.seek(0)
+    xl = pd.ExcelFile(uploaded_file)
 
-    for idx, h in enumerate(headers_raw):
-        hn = norm(h)
-        if not hn:                      # drop truly blank
+    best = None
+    best_score = -1
+    best_info = ""
+    for sheet in xl.sheet_names:
+        try:
+            df = xl.parse(sheet_name=sheet, header=0, dtype=str)
+            df = df.fillna("")
+            df.columns = [str(c).strip() for c in df.columns]
+        except Exception:
             continue
-        if hn in seen_norm:             # drop duplicates by normalized name
-            continue
-        seen_norm.add(hn)
-        keep_indices.append(idx)
-        keep_names.append(h if h else f"col_{idx+1}")
 
-    # Build DF with only kept columns; data is everything after the header row
-    df = raw_df.iloc[header_row_index + 1:, keep_indices].copy()
-    df.columns = keep_names
-    df = df.fillna("")
-    return df, keep_names
+        header_set = {norm(c) for c in df.columns}
+        matches = 0
+        for master_norm, aliases in mapping_aliases_by_master.items():
+            # test if any alias exists in this sheet
+            if any(norm(a) in header_set for a in aliases):
+                matches += 1
 
-# sentinel for “Listing Action”
+        rows = nonempty_rows(df)
+        score = matches + min(rows, 1) * 0.01  # tiny tie-breaker for having data
+
+        if score > best_score:
+            best = (df, sheet)
+            best_score = score
+            best_info = f"matched headers: {matches}, non-empty rows: {rows}"
+
+    if best is None:
+        raise ValueError("No readable sheet found in onboarding workbook.")
+
+    df, sheet_name = best
+    return df, sheet_name, best_info
+
+
+# Unique sentinel for the special "Listing Action" fill
 SENTINEL_LISTING_ACTION = object()
 
-# ---------------- UI ----------------
+# =========================
+# UI
+# =========================
 st.title("📦 Masterfile Automation")
-st.caption("Auto-detect or choose onboarding header row. Cleans headers (drops blanks/duplicates) and writes only rows that contain data.")
+st.caption("Map onboarding columns to master template headers and generate a ready-to-upload masterfile.")
 
-with st.expander("ℹ️ Quick guide", expanded=True):
-    st.markdown("""
-- **Masterfile**: Row **1** = labels, Row **2** = keys, data starts **Row 3** (styles preserved).
-- **Onboarding**: Choose **Auto-detect** or **Pick row** for the header row.  
-  The tool **cleans** that row (removes blank/duplicate headers) and uses it for mapping.  
-  Data is **below** the selected header row.
-- **Mapping JSON**: keys = master labels; values = list of onboarding aliases (priority order).
+with st.expander("ℹ️ Instructions", expanded=True):
+    instructions = dedent("""
+    - **Masterfile template (.xlsx)**  
+      - Row **1** = display labels  
+      - Row **2** = internal keys/helper labels  
+      - Data is written starting at **Row 3** (this tool preserves template styles).
+
+    - **Onboarding sheet (.xlsx)**  
+      - Row **1** = **headers**  
+      - Row **2+** = data
+
+    - **Mapping JSON**: keys are the **master display headers** (Row 1 of master).  
+      Values are **lists of onboarding header aliases** in priority order (first that exists is used).
+
+    **Example**
+    ```json
+    {
+      "Partner SKU": ["Target SKU","Seller SKU","SKU","item_sku"],
+      "Barcode": ["UPC/EAN","UPC","Product ID","barcode","barcode.value"],
+      "Brand": ["Brand Name","brand_name","Walmart Brand Name - en-US"],
+      "Product Title": ["Item Name","Product Name","Title"],
+      "Description": ["Long Description","Product Description","Description"]
+    }
+    ```
     """)
+    st.markdown(instructions)
 
 st.divider()
+
 colA, colB = st.columns([1, 1])
 with colA:
-    masterfile_file = st.file_uploader("📄 Masterfile Template (.xlsx)", type=["xlsx"])
+    masterfile_file = st.file_uploader("📄 Upload Masterfile Template (.xlsx)", type=["xlsx"])
 with colB:
-    onboarding_file = st.file_uploader("🧾 Onboarding Sheet (.xlsx)", type=["xlsx"])
+    onboarding_file = st.file_uploader("🧾 Upload Onboarding Sheet (.xlsx)", type=["xlsx"])
 
 st.markdown("#### 🔗 Mapping JSON")
-tab1, tab2 = st.tabs(["Paste JSON", "Upload JSON"])
-mapping_text = ""
-mapping_file = None
-with tab1:
-    mapping_text = st.text_area(
-        "Paste mapping JSON",
+mapping_tab1, mapping_tab2 = st.tabs(["Paste JSON", "Upload JSON file"])
+mapping_json_text = ""
+mapping_json_file = None
+with mapping_tab1:
+    mapping_json_text = st.text_area(
+        "Paste mapping JSON here",
         height=220,
         placeholder='{\n  "Partner SKU": ["Seller SKU", "item_sku"]\n}',
     )
-with tab2:
-    mapping_file = st.file_uploader("mapping.json", type=["json"])
-
-st.markdown("#### 🧭 Header Row for Onboarding")
-header_mode = st.radio(
-    "How should the app find your header row?",
-    ["Auto-detect", "Pick a row number"],
-    horizontal=True,
-)
-header_row_manual = None
-if header_mode == "Pick a row number":
-    header_row_manual = st.number_input(
-        "Header row number (1-based)", min_value=1, value=1, step=1
-    )
+with mapping_tab2:
+    mapping_json_file = st.file_uploader("Or upload mapping.json", type=["json"], key="mapping_file")
 
 st.divider()
 go = st.button("🚀 Generate Final Masterfile", type="primary")
+
 log_area = st.container()
 download_area = st.container()
 
-# ---------------- Main ----------------
+# =========================
+# Main Action
+# =========================
 if go:
     with log_area:
         st.markdown("### 📝 Log")
         log = st.empty()
-        def slog(msg): log.markdown(msg)
 
+        def slog(msg):
+            log.markdown(msg)
+
+        # Validate inputs
         if not masterfile_file or not onboarding_file:
-            st.error("Please upload both **Masterfile** and **Onboarding** files.")
+            st.error("Please upload both **Masterfile Template** and **Onboarding Sheet**.")
             st.stop()
 
-        # mapping
-        try:
-            mapping_raw = json.loads(mapping_text) if mapping_text.strip() else (
-                json.load(mapping_file) if mapping_file else None
-            )
-        except Exception as e:
-            st.error(f"Mapping JSON could not be parsed. Error: {e}")
-            st.stop()
-        if mapping_raw is None:
+        # Parse mapping JSON
+        mapping_raw = None
+        if mapping_json_text.strip():
+            try:
+                mapping_raw = json.loads(mapping_json_text)
+            except Exception as e:
+                st.error(f"Mapping JSON could not be parsed. Error: {e}")
+                st.stop()
+        elif mapping_json_file is not None:
+            try:
+                mapping_raw = json.load(mapping_json_file)
+            except Exception as e:
+                st.error(f"Mapping JSON file could not be parsed. Error: {e}")
+                st.stop()
+        else:
             st.error("Please provide mapping JSON (paste or upload).")
             st.stop()
 
-        MAPPING = {norm(k): (v[:] if isinstance(v, list) else [v])
-                   for k, v in mapping_raw.items()}
+        # Normalize mapping keys and keep ordered aliases
+        # mapping_aliases_by_master: { master_norm: [alias1, alias2, ...] }
+        mapping_aliases_by_master = {}
+        for k, v in mapping_raw.items():
+            aliases = v[:] if isinstance(v, list) else [v]
+            # also allow the master display itself as a fallback (end of list)
+            if k not in aliases:
+                aliases = aliases + [k]
+            mapping_aliases_by_master[norm(k)] = aliases
 
-        # master
-        slog("⏳ Reading master (preserving styles)…")
+        slog("⏳ Reading workbooks…")
         try:
+            # Read masterfile with openpyxl to preserve template styles
             master_wb = load_workbook(masterfile_file, keep_links=False)
             master_ws = master_wb.active
         except Exception as e:
             st.error(f"Could not read **Masterfile**: {e}")
             st.stop()
-        used_cols = worksheet_used_cols(master_ws, header_rows=(1, 2))
-        master_displays = [master_ws.cell(row=1, column=c).value or ""
-                           for c in range(1, used_cols + 1)]
 
-        # onboarding raw (no header), then pick/auto-detect header row
-        slog("⏳ Reading onboarding…")
+        # --- pick best onboarding sheet automatically ---
         try:
-            raw_df = pd.read_excel(onboarding_file, header=None, dtype=str).fillna("")
+            best_df, best_sheet, info = pick_best_onboarding_sheet(onboarding_file, mapping_aliases_by_master)
+            st.success(f"Using onboarding sheet: **{best_sheet}** ({info})")
         except Exception as e:
-            st.error(f"Could not read **Onboarding**: {e}")
+            st.error(f"Could not find a suitable onboarding sheet: {e}")
             st.stop()
 
-        def build_mapping(df):
-            on_headers = list(df.columns)
-            series_by_alias = {norm(h): df[h] for h in on_headers}
+        on_df = best_df  # already cleaned inside picker
+        # Onboarding headers from DataFrame
+        on_headers = list(on_df.columns)
+        # Build normalized lookup for onboarding Series by header
+        series_by_alias = {norm(h): on_df[h] for h in on_headers}
 
-            master_to_source = {}
-            chosen_alias = {}
-            unmatched = []
-            report_lines = []
+        # Master headers (Row 1 display, Row 2 keys)
+        used_cols = worksheet_used_cols(master_ws, header_rows=(1, 2))
+        master_displays = [master_ws.cell(row=1, column=c).value or "" for c in range(1, used_cols + 1)]
 
-            resolved = 0
-            for c, m_disp in enumerate(master_displays, start=1):
-                disp_norm = norm(m_disp)
-                aliases = MAPPING.get(disp_norm, [])
-                if m_disp:
-                    aliases += [m_disp]
+        # Build master -> onboarding series map
+        master_to_source = {}   # col -> (Series) or SENTINEL_LISTING_ACTION
+        chosen_alias = {}       # col -> alias actually used (for reporting)
+        unmatched = []
+        report_lines = []
 
-                resolved_series = None
-                resolved_alias = None
-                for a in aliases:
-                    a_norm = norm(a)
-                    if a_norm in series_by_alias:
-                        resolved_series = series_by_alias[a_norm]
-                        resolved_alias = a
-                        break
-
-                if resolved_series is not None:
-                    master_to_source[c] = resolved_series
-                    chosen_alias[c] = resolved_alias
-                    resolved += 1
-                    report_lines.append(f"- ✅ **{m_disp}** ← `{resolved_alias}`")
-                else:
-                    if disp_norm == norm("Listing Action (List or Unlist)"):
-                        master_to_source[c] = SENTINEL_LISTING_ACTION
-                        report_lines.append(f"- 🟨 **{m_disp}** ← (will fill `'List'`)")
-                    else:
-                        unmatched.append(m_disp)
-                        suggestions = top_matches(m_disp, on_headers, 3)
-                        sug = ", ".join(f"`{n}` ({round(sc*100,1)}%)" for sc, n in suggestions) if suggestions else "*none*"
-                        report_lines.append(f"- ❌ **{m_disp}** ← *no match*. Suggestions: {sug}")
-            return resolved, master_to_source, chosen_alias, unmatched, report_lines
-
-        if header_mode == "Pick a row number":
-            h0 = int(header_row_manual) - 1
-            if h0 < 0 or h0 >= len(raw_df):
-                st.error("Header row number is out of range for this file.")
-                st.stop()
-            on_df, kept_headers = build_on_df_from_raw(raw_df, h0)
-            resolved, master_to_source, chosen_alias, unmatched, report = build_mapping(on_df)
-            detected_header_row = h0 + 1
-        else:
-            # Auto-detect among first ~10 rows, pick the one that yields most resolved columns
-            best = None
-            max_try = min(10, len(raw_df) - 1)
-            for h0 in range(0, max_try + 1):
-                try:
-                    candidate_df, kept_headers = build_on_df_from_raw(raw_df, h0)
-                except Exception:
-                    continue
-                resolved, m2s, chosen, unmatch, rep = build_mapping(candidate_df)
-                score = (resolved, len(kept_headers))
-                if best is None or score > best[0]:
-                    best = (score, h0, candidate_df, m2s, chosen, unmatch, rep, kept_headers)
-
-            if best is None:
-                st.error("Could not auto-detect a usable header row.")
-                st.stop()
-
-            (_, _), h0, on_df, master_to_source, chosen_alias, unmatched, report, kept_headers = best
-            detected_header_row = h0 + 1
-
-        st.info(
-            f"Header row used for onboarding: **Row {detected_header_row}**. "
-            f"Columns kept after cleaning: **{len(on_df.columns)}**"
-        )
-
-        st.markdown("#### 🔎 Mapping Summary (Master → Onboarding)")
-        st.markdown("\n".join(report))
-
-        # -------- Write only rows that have any mapped data --------
-        slog("🛠️ Writing data…")
-        out_row_start = 3
-
-        def row_has_any_data(i: int) -> bool:
-            for src in master_to_source.values():
-                if isinstance(src, pd.Series):
-                    val = src.iloc[i] if i < len(src) else ""
-                    if pd.notna(val) and str(val).strip() != "":
-                        return True
-            return False
-
-        blank_streak_limit = 50
-        blanks = 0
-        written = 0
-
-        for i in range(len(on_df)):
-            if not row_has_any_data(i):
-                blanks += 1
-                if blanks >= blank_streak_limit:
-                    break
+        report_lines.append("#### 🔎 Mapping Summary")
+        for c, m_disp in enumerate(master_displays, start=1):
+            disp_norm = norm(m_disp)
+            if not disp_norm:
                 continue
-            blanks = 0
-            target_row = out_row_start + written
-            for c in range(1, used_cols + 1):
-                src = master_to_source.get(c)
-                if src is SENTINEL_LISTING_ACTION:
-                    master_ws.cell(row=target_row, column=c, value="List")
-                elif isinstance(src, pd.Series) and i < len(src):
-                    master_ws.cell(row=target_row, column=c, value=src.iloc[i])
-            written += 1
 
-        # save
+            # ordered aliases (priority) from mapping; includes the display itself as fallback
+            aliases = mapping_aliases_by_master.get(disp_norm, [m_disp])
+
+            resolved_series = None
+            resolved_alias = None
+            for a in aliases:
+                a_norm = norm(a)
+                if a_norm in series_by_alias:
+                    resolved_series = series_by_alias[a_norm]
+                    resolved_alias = a
+                    break
+
+            if resolved_series is not None:
+                master_to_source[c] = resolved_series
+                chosen_alias[c] = resolved_alias
+                report_lines.append(f"- ✅ **{m_disp}** ← `{resolved_alias}`")
+            else:
+                if disp_norm == norm("Listing Action (List or Unlist)"):
+                    master_to_source[c] = SENTINEL_LISTING_ACTION
+                    report_lines.append(f"- 🟨 **{m_disp}** ← (will fill `'List'`)")
+                else:
+                    unmatched.append(m_disp)
+                    suggestions = top_matches(m_disp, on_headers, 3)
+                    sug_txt = ", ".join(f"`{name}` ({round(sc*100,1)}%)" for sc, name in suggestions) if suggestions else "*none*"
+                    report_lines.append(f"- ❌ **{m_disp}** ← *no match*. Suggestions: {sug_txt}")
+
+        st.markdown("\n".join(report_lines))
+
+        # Write values to master starting row 3
+        slog("🛠️ Writing data…")
+        out_row = 3
+        num_rows = len(on_df)
+
+        for i in range(num_rows):
+            for c in range(1, used_cols + 1):
+                src = master_to_source.get(c, None)
+                if src is None:
+                    continue
+                if src is SENTINEL_LISTING_ACTION:
+                    master_ws.cell(row=out_row + i, column=c, value="List")
+                elif isinstance(src, pd.Series):
+                    if i < len(src):
+                        # write as text to preserve things like leading zeros
+                        master_ws.cell(row=out_row + i, column=c, value=str(src.iloc[i]))
+
+        # Save to buffer
         slog("💾 Saving…")
         bio = io.BytesIO()
         master_wb.save(bio)
         bio.seek(0)
 
         with download_area:
-            st.success(f"✅ Final masterfile is ready! Rows written: **{written}**")
+            st.success("✅ Final masterfile is ready!")
             st.download_button(
                 "⬇️ Download Final Masterfile",
                 data=bio.getvalue(),
@@ -311,4 +321,7 @@ if go:
             )
 
             if unmatched:
-                st.info("Some master columns had no match and were left blank:\n\n- " + "\n- ".join(unmatched))
+                st.info(
+                    "Some master columns had no match and were left blank:\n\n- " +
+                    "\n- ".join(unmatched)
+                )
