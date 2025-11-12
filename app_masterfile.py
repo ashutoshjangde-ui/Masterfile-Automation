@@ -325,3 +325,4 @@ if go:
                     "Some master columns had no match and were left blank:\n\n- " +
                     "\n- ".join(unmatched)
                 )
+
