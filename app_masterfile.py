@@ -154,6 +154,22 @@ def safe_filename(name: str, fallback: str = "final_masterfile") -> str:
     name = re.sub(r"[^A-Za-z0-9._ -]+", "", name)
     return name or fallback
 
+# ★ NEW: simple best-guess helper for manual defaults
+def _best_guess(target, options):
+    def _n(s):
+        s = str(s or "").strip().lower()
+        s = re.sub(r"\s*-\s*en\s*[-_ ]\s*us\s*$", "", s)
+        s = s.replace("–","-").replace("—","-").replace("−","-")
+        s = re.sub(r"[._/\\-]+", " ", s)
+        s = re.sub(r"[^0-9a-z\s]+", " ", s)
+        return re.sub(r"\s+"," ", s).strip()
+    t = _n(target)
+    if not t or not options:
+        return None
+    scored = [(SequenceMatcher(None, t, _n(opt)).ratio(), opt) for opt in options]
+    scored.sort(reverse=True)
+    return scored[0][1] if scored else None
+
 # ─────────────────────────────────────────────────────────────────────
 # ZIP / XML Processing Functions
 # ─────────────────────────────────────────────────────────────────────
@@ -425,27 +441,11 @@ with c2:
         help="Upload the onboarding data to be mapped"
     )
 
-st.markdown("#### 🔗 Mapping JSON")
-st.caption("Define how onboarding columns map to masterfile headers")
+# ★ CHANGED: Remove Mapping JSON section; replace with info for manual mapping
+st.markdown("#### 🔗 Mapping")
+st.caption("Use the manual mapper below to choose the source column for each master header. Defaults are auto-guessed; you can tweak quickly.")
 
-tab1, tab2 = st.tabs(["📝 Paste JSON", "📁 Upload JSON"])
-mapping_json_text, mapping_json_file = "", None
-
-with tab1:
-    mapping_json_text = st.text_area(
-        "Paste mapping JSON", 
-        height=200,
-        placeholder='{\n  "TCIN": ["tcin", "item_id"],\n  "Product Title": ["title", "product_name"],\n  "Product Description": ["description", "desc"]\n}',
-        help="Map master headers to possible onboarding column names"
-    )
-
-with tab2:
-    mapping_json_file = st.file_uploader(
-        "Or upload mapping.json", 
-        type=["json"], 
-        key="mapping_file",
-        help="Upload a JSON file with column mappings"
-    )
+# (REMOVED tabs + JSON upload)
 
 st.markdown("#### 📝 Output Settings")
 final_name_input = st.text_input(
@@ -493,38 +493,8 @@ if go:
         }
         out_mime = mime_map.get(ext, mime_map[".xlsx"])
         
-        # Parse mapping JSON
-        slog("⏳ **Step 1/6:** Parsing mapping JSON...", 0.1)
-        try:
-            if mapping_json_text.strip():
-                mapping_raw = json.loads(mapping_json_text)
-            elif mapping_json_file:
-                mapping_raw = json.load(mapping_json_file)
-            else:
-                st.error("❌ Please provide mapping JSON (paste or upload).")
-                st.markdown("</div>", unsafe_allow_html=True)
-                st.stop()
-        except json.JSONDecodeError as e:
-            st.error(f"❌ Invalid JSON format: {e}")
-            st.markdown("</div>", unsafe_allow_html=True)
-            st.stop()
-        
-        if not isinstance(mapping_raw, dict):
-            st.error("❌ Mapping JSON must be an object: {\"Master header\": [aliases...]}.")
-            st.markdown("</div>", unsafe_allow_html=True)
-            st.stop()
-        
-        # Normalize mapping
-        mapping_aliases = {}
-        for k, v in mapping_raw.items():
-            aliases = v[:] if isinstance(v, list) else [v]
-            if k not in aliases: aliases.append(k)
-            mapping_aliases[norm(k)] = aliases
-        
-        slog(f"✅ Loaded {len(mapping_aliases)} header mappings", 0.2)
-        
-        # Read template headers
-        slog("⏳ **Step 2/6:** Reading template headers...", 0.3)
+        # ★ CHANGED: Step numbers adjusted; no JSON parse
+        slog("⏳ **Step 1/5:** Reading template headers...", 0.15)
         masterfile_file.seek(0)
         master_bytes = masterfile_file.read()
         
@@ -543,10 +513,10 @@ if go:
         secondary_headers = [ws_ro.cell(row=MASTER_SECONDARY_ROW, column=c).value or "" for c in range(1, used_cols+1)]
         wb_ro.close()
         
-        slog(f"✅ Loaded {used_cols} columns from template in {time.time()-t0:.2f}s", 0.4)
+        slog(f"✅ Loaded {used_cols} columns from template in {time.time()-t0:.2f}s", 0.3)
         
         # Read onboarding sheet
-        slog("⏳ **Step 3/6:** Analyzing onboarding sheet...", 0.5)
+        slog("⏳ **Step 2/5:** Analyzing onboarding sheet...", 0.45)
         try:
             best_xl = pd.ExcelFile(onboarding_file)
             best, best_score, best_info = None, -1, ""
@@ -559,8 +529,8 @@ if go:
                     continue
                 
                 header_set = {norm(c) for c in df.columns}
-                matches = sum(any(norm(a) in header_set for a in aliases)
-                             for aliases in mapping_aliases.values())
+                # ★ CHANGED: match using master display headers overlap (no mapping JSON)
+                matches = sum(1 for h in display_headers if norm(h) in header_set)
                 rows = nonempty_rows(df)
                 score = matches + (0.01 if rows > 0 else 0.0)
                 
@@ -569,7 +539,7 @@ if go:
                     best_info = f"{matches} matched headers, {rows} non-empty rows"
             
             if best is None:
-                raise ValueError("No readable onboarding sheet found with matching headers.")
+                raise ValueError("No readable onboarding sheet found.")
             
             best_df, best_sheet, info = best[0], best[1], best_info
             
@@ -583,53 +553,58 @@ if go:
         on_headers = list(on_df.columns)
         
         st.success(f"✅ Using onboarding sheet: **{best_sheet}** ({info})")
-        
-        # Build mapping
-        slog("⏳ **Step 4/6:** Mapping columns...", 0.6)
+
+        # ★ NEW: Manual Mapping UI (form) with auto-guessed defaults
+        st.markdown("#### 🧭 Manual Mapping (pick source for each master column)")
+        with st.form("manual_map_form", clear_on_submit=False):
+            mapping_selections = {}
+            choices = ["— None —"] + on_headers
+            cols_ui = st.columns(2)
+            for idx, m_disp in enumerate(display_headers, start=1):
+                label = f"{idx}. {m_disp or '(blank)'}"
+                guess = _best_guess(m_disp, on_headers) if m_disp else None
+                default_index = choices.index(guess) if (guess and guess in choices) else 0
+                with cols_ui[idx % 2]:
+                    pick = st.selectbox(label, choices=choices, index=default_index, key=f"map_{idx}")
+                mapping_selections[idx] = None if pick == "— None —" else pick
+            submitted = st.form_submit_button("✅ Apply Mapping")
+
+        if not submitted:
+            st.info("Select sources for the master columns and click **Apply Mapping** to continue.")
+            st.markdown("</div>", unsafe_allow_html=True)
+            st.stop()
+
+        # Build mapping from selections
+        slog("⏳ **Step 3/5:** Applying mapping...", 0.6)
         series_by_alias = {norm(h): on_df[h] for h in on_headers}
-        report_lines = ["#### 🔎 Column Mapping Results"]
-        
         master_to_source = {}
+        chosen_alias = {}
+        report_lines = ["#### 🔎 Column Mapping Results"]
         matched_count = 0
         unmatched_count = 0
-        
-        for c, (disp, sec) in enumerate(zip(display_headers, secondary_headers), start=1):
-            disp_norm = norm(disp)
-            
-            # For Target, use display header only
-            effective_header = disp
-            label_for_log = disp
-            eff_norm = disp_norm
-            
-            if not eff_norm: 
-                continue
-            
-            aliases = mapping_aliases.get(eff_norm, [effective_header])
-            resolved = None
-            matched_alias = None
-            
-            for a in aliases:
-                s = series_by_alias.get(norm(a))
-                if s is not None:
-                    resolved = s
-                    matched_alias = a
-                    break
-            
-            if resolved is not None:
-                master_to_source[c] = resolved
-                report_lines.append(f"- ✅ **{label_for_log}** ← `{matched_alias}`")
-                matched_count += 1
-            else:
-                sugg = top_matches(effective_header, on_headers, 3)
-                sug_txt = ", ".join(f"`{name}` ({round(sc*100,1)}%)" for sc, name in sugg) if sugg else "*none*"
-                report_lines.append(f"- ❌ **{label_for_log}** ← _no match_. Suggestions: {sug_txt}")
+
+        for c, m_disp in enumerate(display_headers, start=1):
+            pick = mapping_selections.get(c)
+            if pick is None:
                 unmatched_count += 1
-        
+                report_lines.append(f"- ❌ **{m_disp}** ← _left blank_")
+                continue
+
+            src = series_by_alias.get(norm(pick))
+            if src is not None:
+                master_to_source[c] = src
+                chosen_alias[c] = pick
+                matched_count += 1
+                report_lines.append(f"- ✅ **{m_disp}** ← `{pick}` (manual)")
+            else:
+                unmatched_count += 1
+                report_lines.append(f"- ❌ **{m_disp}** ← _not found in onboarding_")
+
         st.markdown("\n".join(report_lines))
-        st.info(f"📊 Mapping Stats: **{matched_count} matched**, **{unmatched_count} unmatched** out of {len(display_headers)} total columns")
-        
+        st.info(f"📊 Mapping Stats: **{matched_count} mapped**, **{unmatched_count} left blank** out of {len(display_headers)} columns")
+
         # Build data block
-        slog("⏳ **Step 5/6:** Building data block...", 0.7)
+        slog("⏳ **Step 4/5:** Building data block...", 0.75)
         n_rows = len(on_df)
         block = [[""] * used_cols for _ in range(n_rows)]
         
@@ -641,10 +616,10 @@ if go:
                 if v and v.lower() not in ("nan", "none", ""):
                     block[i][col-1] = v
         
-        slog(f"✅ Built data block: {n_rows} rows × {used_cols} columns", 0.8)
+        slog(f"✅ Built data block: {n_rows} rows × {used_cols} columns", 0.85)
         
         # Write output file
-        slog("⏳ **Step 6/6:** Writing final masterfile via fast XML...", 0.85)
+        slog("⏳ **Step 5/5:** Writing final masterfile via fast XML...", 0.9)
         t_write = time.time()
         
         out_bytes = fast_patch_template(
@@ -682,7 +657,7 @@ if go:
         with col2:
             st.metric("Total Columns", f"{used_cols}")
         with col3:
-            st.metric("Matched", f"{matched_count}")
+            st.metric("Mapped", f"{matched_count}")
         with col4:
             st.metric("Processing Time", f"{write_time:.2f}s")
         
@@ -716,97 +691,24 @@ with st.expander("📘 How to Use This Tool", expanded=False):
     ### Step-by-Step Usage
     
     1. **Upload Masterfile Template**
-       - Your Target template with 3 sheets
-       - Can be .xlsx or .xlsm format
-    
     2. **Upload Onboarding Sheet**
-       - Contains source data to map
-       - Must be .xlsx format
-       - Tool auto-selects best sheet
-    
-    3. **Provide Mapping JSON**
-       - Either paste or upload
-       - Format example:
-       ```json
-       {{
-         "TCIN": ["tcin", "target_item_id"],
-         "Product Title": ["title", "product_name"],
-         "Product Description": ["description", "long_desc"],
-         "Brand": ["brand_name", "manufacturer"]
-       }}
-       ```
-    
+    3. **Manual Mapping**
+       - Pick the source column for each master header in the dropdowns
+       - Defaults are auto-guessed; adjust as needed
     4. **Enter Output Filename** (optional)
-       - Custom name for your file
-       - Extension added automatically
-    
-    5. **Click Generate**
-       - Processing takes 2-5 seconds
-       - Download button appears when ready
-    
-    ### Mapping JSON Guide
-    
-    **Structure:**
-    - **Key:** Master template header (exact name from Row 1)
-    - **Value:** Array of possible onboarding column names
-    
-    **Tips:**
-    - Tool uses fuzzy matching for flexibility
-    - Include common variations in aliases
-    - Case-insensitive matching
-    - Ignores special characters and spaces
+    5. **Click Generate** → Download
     
     ### Troubleshooting
-    
-    **"Sheet not found" error:**
-    - Ensure your template has "{MASTER_TEMPLATE_SHEET}" sheet
-    - Check spelling and spaces in sheet name
-    
-    **Low match rate:**
-    - Review mapping JSON
-    - Check onboarding column names
-    - Use suggestions from mapping results
-    
-    **Processing fails:**
-    - Verify files aren't corrupted
-    - Check file formats (.xlsx/.xlsm)
-    - Ensure mapping JSON is valid
-    
-    ### Performance Notes
-    - Processes 1,000 rows: ~2 seconds
-    - Processes 10,000 rows: ~5 seconds
-    - Processes 50,000 rows: ~15 seconds
-    
-    ### Technical Details
-    - Uses direct XML manipulation
-    - Preserves all Excel features
-    - No data loss or corruption
-    - Maintains file integrity
+    - If few columns map, adjust selections in the manual mapping form.
+    - Ensure onboarding sheet headers are in Row 1 of the selected sheet.
     """))
 
 with st.expander("💡 Example Mapping JSON", expanded=False):
-    st.markdown("### Sample Mapping for Target")
-    st.code('''
-{
-  "TCIN": ["tcin", "item_id", "product_id"],
-  "Product Title": ["title", "product_name", "item_title"],
-  "Product Description": ["description", "long_description", "desc"],
-  "Brand": ["brand", "brand_name", "manufacturer"],
-  "Item Type": ["type", "item_type", "product_type"],
-  "Product Dimensions": ["dimensions", "size", "product_size"],
-  "Weight": ["weight", "shipping_weight", "item_weight"],
-  "Color": ["color", "colour", "item_color"],
-  "Material": ["material", "fabric", "item_material"],
-  "UPC": ["upc", "barcode", "upc_code"],
-  "Price": ["price", "retail_price", "msrp"],
-  "Quantity": ["quantity", "qty", "stock_qty"],
-  "Image URL": ["image", "image_url", "primary_image"],
-  "Bullet Point 1": ["bullet_1", "feature_1", "highlight_1"],
-  "Bullet Point 2": ["bullet_2", "feature_2", "highlight_2"],
-  "Bullet Point 3": ["bullet_3", "feature_3", "highlight_3"],
-  "Keywords": ["keywords", "search_terms", "seo_keywords"]
-}
-    ''', language='json')
+    # ★ CHANGED: Keep section for backward compatibility hint (but not used anymore)
+    st.markdown("Manual mapping is now built-in. JSON is no longer required.")
+    st.code('''{
+  "Example Only": ["This section is informational now"]
+}''', language='json')
 
 # Footer
 st.markdown("---")
@@ -817,4 +719,3 @@ st.markdown(
     "</div>", 
     unsafe_allow_html=True
 )
-
