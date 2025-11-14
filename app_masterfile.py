@@ -22,7 +22,7 @@ st.markdown("""
 .badge{display:inline-block; padding:4px 10px; border-radius:999px; font-size:.82rem; font-weight:600; margin-right:.25rem;}
 .badge-info{background:#eef2ff;color:#1e40af;} .badge-ok{background:#ecfdf5;color:#065f46;} .badge-target{background:#fff0f0;color:#cc0000;}
 div.stButton>button,.stDownloadButton>button{background:var(--accent)!important;color:#fff!important;border-radius:10px!important;border:0!important;font-weight:600!important;padding:0.5rem 1.5rem!important;transition:all .3s ease!important;}
-div.stButton>button:hover,.stDownloadButton>button:hover{transform:translateY(-2px);box-shadow:0 4px 12px rgba(204,0,0,0.3)!important;}
+div.stButton>button:hover,.stDownloadButton>button:hover{transform:translateY(-2px);box-shadow:0 4px 12px rgba(0,0,0,0.3)!important;}
 h1{color:var(--accent);}
 </style>
 """, unsafe_allow_html=True)
@@ -254,43 +254,6 @@ with c1:
 with c2:
     onboarding_file = st.file_uploader("🧾 Onboarding Sheet (.xlsx)", type=["xlsx"], help="Upload the onboarding data")
 
-# ★ NEW: Pre-run Category Filter UI (before Generate)
-st.markdown("#### 🔎 Row filter (by category)")
-if onboarding_file is not None:
-    try:
-        xl = pd.ExcelFile(onboarding_file)
-        # pick the sheet most likely to have a category column
-        best_df, best_sheet, best_score = None, None, -1
-        for sh in xl.sheet_names:
-            try:
-                df = xl.parse(sh, header=0, dtype=str, nrows=500).fillna("")
-                df.columns = [str(c).strip() for c in df.columns]
-            except Exception:
-                continue
-            score = sum(("category" in c.lower()) for c in df.columns)
-            if score > best_score:
-                best_df, best_sheet, best_score = df, sh, score
-        if best_df is not None:
-            on_headers_preview = list(best_df.columns)
-            cat_candidates = [h for h in on_headers_preview if "category" in h.lower()]
-            if cat_candidates:
-                st.session_state.cat_col = st.selectbox("Category column", options=cat_candidates, key="cat_col_select")
-                vals = sorted({str(v).strip() for v in best_df[st.session_state.cat_col].astype(str) if str(v).strip() not in ("","nan","none")})
-                default_guess = []
-                if masterfile_file is not None:
-                    fname = (masterfile_file.name or "").lower()
-                    default_guess = [v for v in vals if v.lower() in fname]
-                st.session_state.cat_values = st.multiselect("Include only these categories", options=vals, default=default_guess, key="cat_vals_select")
-            else:
-                st.info("No column containing “category” detected in the onboarding preview.")
-        else:
-            st.info("Couldn’t read the onboarding sheet yet.")
-    except Exception:
-        st.info("Upload the onboarding file to enable category filtering.")
-else:
-    st.info("Upload the onboarding file to enable category filtering.")
-# ★ END NEW
-
 st.markdown("#### 🔗 Mapping JSON")
 st.caption("Define how onboarding columns map to masterfile headers")
 
@@ -331,7 +294,7 @@ if go:
         mime_map = {".xlsx":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xlsm":"application/vnd.ms-excel.sheet.macroEnabled.12"}
         out_mime = mime_map.get(ext, mime_map[".xlsx"])
 
-        # Parse mapping JSON
+        # Step 1
         slog("⏳ **Step 1/6:** Parsing mapping JSON...", 0.1)
         try:
             if mapping_json_text.strip(): mapping_raw = json.loads(mapping_json_text)
@@ -349,7 +312,7 @@ if go:
             mapping_aliases[norm(k)] = aliases
         slog(f"✅ Loaded {len(mapping_aliases)} header mappings", 0.2)
 
-        # Read template headers
+        # Step 2
         slog("⏳ **Step 2/6:** Reading template headers...", 0.3)
         masterfile_file.seek(0); master_bytes = masterfile_file.read()
         t0=time.time()
@@ -365,7 +328,7 @@ if go:
         wb_ro.close()
         slog(f"✅ Loaded {used_cols} columns from template in {time.time()-t0:.2f}s", 0.4)
 
-        # Read onboarding sheet (best sheet detection)
+        # Step 3
         slog("⏳ **Step 3/6:** Analyzing onboarding sheet...", 0.5)
         try:
             best_xl = pd.ExcelFile(onboarding_file)
@@ -392,16 +355,44 @@ if go:
         on_headers = list(on_df.columns)
         st.success(f"✅ Using onboarding sheet: **{best_sheet}** ({info})")
 
-        # ★ NEW: Apply preselected category filter
-        cat_col = st.session_state.get("cat_col")
-        cat_vals = st.session_state.get("cat_values")
-        if cat_col and cat_vals and cat_col in on_df.columns:
-            _before = len(on_df)
-            on_df = on_df[on_df[cat_col].astype(str).str.strip().isin(cat_vals)].copy()
-            st.info(f"Filtering on **{cat_col}** ∈ {cat_vals} → kept {len(on_df)}/{_before} rows.")
-        # ★ END NEW
+        # --------- NEW: Category filter UI (runs before mapping) ---------
+        st.markdown("#### 🔎 Row filter (by category)")
+        cat_candidates = [h for h in on_headers if norm(h) in {"target category", "category", "walmart category"}]
+        if not cat_candidates:
+            cat_candidates = [h for h in on_headers if "category" in h.lower()]
 
-        # Mapping
+        cat_col = st.selectbox(
+            "Category column",
+            options=(cat_candidates if cat_candidates else ["(none found)"]),
+            index=0 if cat_candidates else 0,
+            help="Select the column in the onboarding sheet that holds the product category."
+        )
+
+        selected_values = []
+        if cat_candidates:
+            vals = sorted({str(v).strip() for v in on_df[cat_col].astype(str).tolist() if str(v).strip() not in ("", "nan", "none")})
+            fname = (masterfile_file.name or "").lower()
+            guess = [v for v in vals if v.lower() in fname] or []
+            selected_values = st.multiselect(
+                "Include only these categories",
+                options=vals,
+                default=guess,
+                help="Final file will include only rows whose category is in this list."
+            )
+
+        if cat_candidates and selected_values:
+            _before = len(on_df)
+            on_df = on_df[on_df[cat_col].astype(str).str.strip().isin(selected_values)].copy()
+            st.info(f"Filtering rows on **{cat_col}** ∈ {selected_values} → kept {len(on_df)}/{_before} rows.")
+        elif cat_candidates:
+            st.warning("No category values selected — no filtering applied.")
+        else:
+            st.warning("No category column detected — no filtering applied.")
+        on_df = on_df.fillna("")
+        on_headers = list(on_df.columns)
+        # --------- END NEW ------------------------------------------------
+
+        # Step 4
         slog("⏳ **Step 4/6:** Mapping columns...", 0.6)
         series_by_alias = {norm(h): on_df[h] for h in on_headers}
         report_lines = ["#### 🔎 Column Mapping Results"]
@@ -424,7 +415,7 @@ if go:
         st.markdown("\n".join(report_lines))
         st.info(f"📊 Mapping Stats: **{matched_count} matched**, **{unmatched_count} unmatched** out of {len(display_headers)} total columns")
 
-        # Build block
+        # Step 5
         slog("⏳ **Step 5/6:** Building data block...", 0.7)
         n_rows = len(on_df)
         block = [[""] * used_cols for _ in range(n_rows)]
@@ -436,7 +427,7 @@ if go:
                     block[i][col-1] = v
         slog(f"✅ Built data block: {n_rows} rows × {used_cols} columns", 0.8)
 
-        # Write file
+        # Step 6
         slog("⏳ **Step 6/6:** Writing final masterfile via fast XML...", 0.85)
         t_write=time.time()
         out_bytes = fast_patch_template(master_bytes=master_bytes, sheet_name=MASTER_TEMPLATE_SHEET, header_row=MASTER_DISPLAY_ROW, start_row=MASTER_DATA_START_ROW, used_cols=used_cols, block_2d=block)
