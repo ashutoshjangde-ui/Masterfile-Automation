@@ -150,12 +150,8 @@ def _intersects_range(a1: str, r1: int, r2: int) -> bool:
     if lo>hi: lo,hi=hi,lo
     return not (hi<r1 or lo>r2)
 
-# ── FIXED: write cells only when non-empty ───────────────────────────
+# ── FIXED writer: only non-empty cells ───────────────────────────────
 def _patch_sheet_xml(sheet_xml_bytes: bytes, header_row: int, start_row: int, used_cols_final: int, block_2d: list) -> bytes:
-    """
-    Use inlineStr for non-empty text cells only. Empty cells are omitted.
-    This prevents Excel 'recovered content' warnings.
-    """
     root = ET.fromstring(sheet_xml_bytes)
     _ensure_ws_x14ac(root)
 
@@ -163,16 +159,12 @@ def _patch_sheet_xml(sheet_xml_bytes: bytes, header_row: int, start_row: int, us
     if sheetData is None:
         sheetData = ET.SubElement(root, f"{{{XL_NS_MAIN}}}sheetData")
 
-    # Remove existing rows at/after start_row
     for row in list(sheetData):
-        try:
-            r = int(row.attrib.get("r") or "0")
-        except Exception:
-            r = 0
+        try: r = int(row.attrib.get("r") or "0")
+        except Exception: r = 0
         if r >= start_row:
             sheetData.remove(row)
 
-    # Remove merges intersecting data area
     mergeCells = root.find(f"{{{XL_NS_MAIN}}}mergeCells")
     if mergeCells is not None:
         for mc in list(mergeCells):
@@ -195,7 +187,7 @@ def _patch_sheet_xml(sheet_xml_bytes: bytes, header_row: int, start_row: int, us
             val = src_row[j] if j < len(src_row) else ""
             txt = sanitize_xml_text(val).strip() if val else ""
             if not txt:
-                continue  # skip empty cells entirely
+                continue
             col = _col_letter(j + 1)
             c = ET.Element(f"{{{XL_NS_MAIN}}}c", r=f"{col}{r}", t="inlineStr")
             is_el = ET.SubElement(c, f"{{{XL_NS_MAIN}}}is")
@@ -206,19 +198,16 @@ def _patch_sheet_xml(sheet_xml_bytes: bytes, header_row: int, start_row: int, us
 
         sheetData.append(row_el)
 
-    # Update dimension
     dim = root.find(f"{{{XL_NS_MAIN}}}dimension")
     if dim is None:
         dim = ET.SubElement(root, f"{{{XL_NS_MAIN}}}dimension", ref="A1:A1")
     last_row = max(header_row, start_row + max(0, n_rows) - 1)
     dim.set("ref", _union_dimension(dim.attrib.get("ref", "A1:A1"), used_cols_final, last_row))
 
-    # Keep autoFilter range in sync if present
     af = root.find(f"{{{XL_NS_MAIN}}}autoFilter")
     if af is not None:
         af.set("ref", f"A{header_row}:{_col_letter(used_cols_final)}{last_row}")
 
-    # Clear filterMode if set
     sheetPr = root.find(f"{{{XL_NS_MAIN}}}sheetPr")
     if sheetPr is not None and sheetPr.attrib.get("filterMode"):
         sheetPr.attrib.pop("filterMode", None)
@@ -291,41 +280,71 @@ with c1:
 with c2:
     onboarding_file = st.file_uploader("🧾 Onboarding Sheet (.xlsx)", type=["xlsx"], help="Upload the onboarding data")
 
-# Pre-run Category Filter UI (before Generate)
+# ── FILTER: first-column or manual list (runs BEFORE Generate) ───────
 st.markdown("#### 🔎 Row filter (by category)")
+
+# You can extend this list at will
+TARGET_CATEGORIES = [
+    "Protein Powders and Collagen",
+    "Nutritional Shakes",
+    "Vitamins",
+    "Nutrition Drinks",
+    "Protein Supplements",
+]
+
+def _best_category_column(df: pd.DataFrame) -> str:
+    # 1) explicit 'category' header if present, else 2) first column
+    for c in df.columns:
+        if "category" in str(c).lower():
+            return c
+    return df.columns[0]
+
 if onboarding_file is not None:
     try:
         xl = pd.ExcelFile(onboarding_file)
-        best_df, best_sheet, best_score = None, None, -1
-        for sh in xl.sheet_names:
-            try:
-                df = xl.parse(sh, header=0, dtype=str, nrows=500).fillna("")
-                df.columns = [str(c).strip() for c in df.columns]
-            except Exception:
-                continue
-            score = sum(("category" in c.lower()) for c in df.columns)
-            if score > best_score:
-                best_df, best_sheet, best_score = df, sh, score
-        if best_df is not None:
-            on_headers_preview = list(best_df.columns)
-            cat_candidates = [h for h in on_headers_preview if "category" in h.lower()]
-            if cat_candidates:
-                st.session_state.cat_col = st.selectbox("Category column", options=cat_candidates, key="cat_col_select")
-                vals = sorted({str(v).strip() for v in best_df[st.session_state.cat_col].astype(str) if str(v).strip() not in ("","nan","none")})
-                default_guess = []
-                if masterfile_file is not None:
-                    fname = (masterfile_file.name or "").lower()
-                    default_guess = [v for v in vals if v.lower() in fname]
-                st.session_state.cat_values = st.multiselect("Include only these categories", options=vals, default=default_guess, key="cat_vals_select")
-            else:
-                st.info("No column containing “category” detected in the onboarding preview.")
+        # preview first sheet for UI
+        preview = xl.parse(xl.sheet_names[0], header=0, dtype=str, nrows=100).fillna("")
+        preview.columns = [str(c).strip() for c in preview.columns]
+        first_col = preview.columns[0]
+        auto_col = _best_category_column(preview)
+
+        mode = st.radio(
+            "Filter mode",
+            ["Use first column (A) from onboarding", "Choose Target category manually"],
+            horizontal=True,
+            help="Pick how you want to filter rows for the final file."
+        )
+
+        if mode == "Use first column (A) from onboarding":
+            st.caption(f"Using onboarding column **{first_col}**")
+            col_vals = sorted({str(v).strip() for v in preview[first_col].astype(str) if str(v).strip() not in ("","nan","none")})
+            defaults = []
+            if masterfile_file is not None:
+                fname = (masterfile_file.name or "").lower()
+                defaults = [v for v in col_vals if v.lower() in fname]
+            chosen = st.multiselect("Include only these values from column A", options=col_vals, default=defaults)
+            st.session_state.filter_mode = "first"
+            st.session_state.cat_col = first_col
+            st.session_state.cat_values = chosen
+
         else:
-            st.info("Couldn’t read the onboarding sheet yet.")
+            st.caption(f"Will filter by the detected category column **{auto_col}** (or column A if none).")
+            manual = st.multiselect(
+                "Choose Target categories (type to search)",
+                options=TARGET_CATEGORIES,
+                default=[],
+                help="We will include only rows whose category matches these values."
+            )
+            st.session_state.filter_mode = "manual"
+            st.session_state.cat_col = auto_col
+            st.session_state.cat_values = manual
+
     except Exception:
         st.info("Upload the onboarding file to enable category filtering.")
 else:
     st.info("Upload the onboarding file to enable category filtering.")
 
+# ── Mapping JSON / Output UI (unchanged) ─────────────────────────────
 st.markdown("#### 🔗 Mapping JSON")
 st.caption("Define how onboarding columns map to masterfile headers")
 
@@ -427,13 +446,17 @@ if go:
         on_headers = list(on_df.columns)
         st.success(f"✅ Using onboarding sheet: **{best_sheet}** ({info})")
 
-        # Apply preselected category filter
+        # Apply selected category filter
         cat_col = st.session_state.get("cat_col")
         cat_vals = st.session_state.get("cat_values")
         if cat_col and cat_vals and cat_col in on_df.columns:
             _before = len(on_df)
             on_df = on_df[on_df[cat_col].astype(str).str.strip().isin(cat_vals)].copy()
             st.info(f"Filtering on **{cat_col}** ∈ {cat_vals} → kept {len(on_df)}/{_before} rows.")
+        elif cat_col and cat_col in on_df.columns:
+            st.warning("No category values selected — no filtering applied.")
+        else:
+            st.warning("No category column detected — no filtering applied.")
 
         # Mapping
         slog("⏳ **Step 4/6:** Mapping columns...", 0.6)
