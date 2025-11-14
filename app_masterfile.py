@@ -254,6 +254,50 @@ with c1:
 with c2:
     onboarding_file = st.file_uploader("🧾 Onboarding Sheet (.xlsx)", type=["xlsx"], help="Upload the onboarding data")
 
+# ── NEW: Category picker immediately after onboarding upload ─────────
+st.markdown("#### 🔎 Row filter (by category)")
+if onboarding_file is not None:
+    try:
+        xl = pd.ExcelFile(onboarding_file)
+        # choose the sheet with the strongest "category" signal (no mapping needed)
+        best_df, best_sheet, best_score = None, None, -1
+        for sh in xl.sheet_names:
+            try:
+                df = xl.parse(sh, header=0, dtype=str, nrows=500).fillna("")
+                df.columns = [str(c).strip() for c in df.columns]
+            except Exception:
+                continue
+            score = sum(("category" in c.lower()) for c in df.columns)
+            if score > best_score:
+                best_df, best_sheet, best_score = df, sh, score
+
+        if best_df is not None:
+            headers = list(best_df.columns)
+            cat_candidates = [h for h in headers if norm(h) in {"target category", "category", "walmart category"}] \
+                             or [h for h in headers if "category" in h.lower()]
+
+            if cat_candidates:
+                # preselect previously chosen column if available
+                default_col = st.session_state.get("cat_col")
+                if default_col not in cat_candidates:
+                    default_col = cat_candidates[0]
+                cat_col = st.selectbox("Category column", options=cat_candidates, index=cat_candidates.index(default_col) if default_col in cat_candidates else 0, key="cat_col")
+                vals = sorted({str(v).strip() for v in best_df[cat_col].astype(str) if str(v).strip() not in ("","nan","none")})
+                # guess from template filename
+                fname = (masterfile_file.name or "").lower() if masterfile_file is not None else ""
+                guess = [v for v in vals if v.lower() in fname]
+                st.session_state.cat_values = st.multiselect("Include only these categories", options=vals, default=st.session_state.get("cat_values", guess), key="cat_values")
+                st.caption("Selected categories will be applied when you click Generate.")
+            else:
+                st.info("No column containing “category” found in the uploaded sheet.")
+        else:
+            st.info("Couldn’t read the onboarding file preview.")
+    except Exception:
+        st.info("Upload the onboarding file to enable category filtering.")
+else:
+    st.info("Upload the onboarding file to enable category filtering.")
+# ── END NEW ──────────────────────────────────────────────────────────
+
 st.markdown("#### 🔗 Mapping JSON")
 st.caption("Define how onboarding columns map to masterfile headers")
 
@@ -355,42 +399,13 @@ if go:
         on_headers = list(on_df.columns)
         st.success(f"✅ Using onboarding sheet: **{best_sheet}** ({info})")
 
-        # --------- NEW: Category filter UI (runs before mapping) ---------
-        st.markdown("#### 🔎 Row filter (by category)")
-        cat_candidates = [h for h in on_headers if norm(h) in {"target category", "category", "walmart category"}]
-        if not cat_candidates:
-            cat_candidates = [h for h in on_headers if "category" in h.lower()]
-
-        cat_col = st.selectbox(
-            "Category column",
-            options=(cat_candidates if cat_candidates else ["(none found)"]),
-            index=0 if cat_candidates else 0,
-            help="Select the column in the onboarding sheet that holds the product category."
-        )
-
-        selected_values = []
-        if cat_candidates:
-            vals = sorted({str(v).strip() for v in on_df[cat_col].astype(str).tolist() if str(v).strip() not in ("", "nan", "none")})
-            fname = (masterfile_file.name or "").lower()
-            guess = [v for v in vals if v.lower() in fname] or []
-            selected_values = st.multiselect(
-                "Include only these categories",
-                options=vals,
-                default=guess,
-                help="Final file will include only rows whose category is in this list."
-            )
-
-        if cat_candidates and selected_values:
+        # APPLY previously chosen category filter (from pre-upload UI)
+        cat_col = st.session_state.get("cat_col")
+        cat_vals = st.session_state.get("cat_values")
+        if cat_col and cat_vals and cat_col in on_df.columns:
             _before = len(on_df)
-            on_df = on_df[on_df[cat_col].astype(str).str.strip().isin(selected_values)].copy()
-            st.info(f"Filtering rows on **{cat_col}** ∈ {selected_values} → kept {len(on_df)}/{_before} rows.")
-        elif cat_candidates:
-            st.warning("No category values selected — no filtering applied.")
-        else:
-            st.warning("No category column detected — no filtering applied.")
-        on_df = on_df.fillna("")
-        on_headers = list(on_df.columns)
-        # --------- END NEW ------------------------------------------------
+            on_df = on_df[on_df[cat_col].astype(str).str.strip().isin(cat_vals)].copy()
+            st.info(f"Filtering on **{cat_col}** ∈ {cat_vals} → kept {len(on_df)}/{_before} rows.")
 
         # Step 4
         slog("⏳ **Step 4/6:** Mapping columns...", 0.6)
@@ -450,5 +465,3 @@ if go:
         with st.expander("🐛 See full error details"): st.exception(e)
     finally:
         st.markdown("</div>", unsafe_allow_html=True)
-
-# (Help sections unchanged)
