@@ -84,7 +84,7 @@ def safe_filename(name: str, fallback: str = "final_masterfile"):
     name = re.sub(r"[^A-Za-z0-9._ -]+", "", name.strip())
     return name or fallback
 
-# ── ZIP / XML patchers ───────────────────────────────────────────────
+# ── ZIP / XML helpers ────────────────────────────────────────────────
 def _find_sheet_part_path(z: zipfile.ZipFile, sheet_name: str) -> str:
     wb_xml = ET.fromstring(z.read("xl/workbook.xml"))
     rels_xml = ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))
@@ -150,22 +150,29 @@ def _intersects_range(a1: str, r1: int, r2: int) -> bool:
     if lo>hi: lo,hi=hi,lo
     return not (hi<r1 or lo>r2)
 
+# ── FIXED: write cells only when non-empty ───────────────────────────
 def _patch_sheet_xml(sheet_xml_bytes: bytes, header_row: int, start_row: int, used_cols_final: int, block_2d: list) -> bytes:
     """
-    Write rows using inlineStr ONLY for non-empty cells.
-    Empty cells are emitted as minimal <c r="A1"/> which avoids Excel 'recovered content' warnings.
+    Use inlineStr for non-empty text cells only. Empty cells are omitted.
+    This prevents Excel 'recovered content' warnings.
     """
-    root = ET.fromstring(sheet_xml_bytes); _ensure_ws_x14ac(root)
-    sheetData = root.find(f"{{{XL_NS_MAIN}}}sheetData") or ET.SubElement(root, f"{{{XL_NS_MAIN}}}sheetData")
+    root = ET.fromstring(sheet_xml_bytes)
+    _ensure_ws_x14ac(root)
 
-    # Remove existing data rows from start_row downwards
+    sheetData = root.find(f"{{{XL_NS_MAIN}}}sheetData")
+    if sheetData is None:
+        sheetData = ET.SubElement(root, f"{{{XL_NS_MAIN}}}sheetData")
+
+    # Remove existing rows at/after start_row
     for row in list(sheetData):
-        try: r=int(row.attrib.get("r") or "0")
-        except: r=0
+        try:
+            r = int(row.attrib.get("r") or "0")
+        except Exception:
+            r = 0
         if r >= start_row:
             sheetData.remove(row)
 
-    # Remove intersecting merge cells
+    # Remove merges intersecting data area
     mergeCells = root.find(f"{{{XL_NS_MAIN}}}mergeCells")
     if mergeCells is not None:
         for mc in list(mergeCells):
@@ -174,8 +181,7 @@ def _patch_sheet_xml(sheet_xml_bytes: bytes, header_row: int, start_row: int, us
         if len(list(mergeCells)) == 0:
             root.remove(mergeCells)
 
-    # Rebuild data rows
-    row_span = f"1:{used_cols_final}" if used_cols_final>0 else "1:1"
+    row_span = f"1:{used_cols_final}" if used_cols_final > 0 else "1:1"
     n_rows = len(block_2d)
 
     for i in range(n_rows):
@@ -187,34 +193,32 @@ def _patch_sheet_xml(sheet_xml_bytes: bytes, header_row: int, start_row: int, us
 
         for j in range(used_cols_final):
             val = src_row[j] if j < len(src_row) else ""
-            txt = sanitize_xml_text(val) if val else ""
+            txt = sanitize_xml_text(val).strip() if val else ""
+            if not txt:
+                continue  # skip empty cells entirely
             col = _col_letter(j + 1)
-
-            if txt == "":
-                # emit empty cell without inline string payload
-                c = ET.Element(f"{{{XL_NS_MAIN}}}c", r=f"{col}{r}")
-            else:
-                c = ET.Element(f"{{{XL_NS_MAIN}}}c", r=f"{col}{r}", t="inlineStr")
-                is_el = ET.SubElement(c, f"{{{XL_NS_MAIN}}}is")
-                t_el = ET.SubElement(is_el, f"{{{XL_NS_MAIN}}}t")
-                t_el.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
-                t_el.text = txt
-
+            c = ET.Element(f"{{{XL_NS_MAIN}}}c", r=f"{col}{r}", t="inlineStr")
+            is_el = ET.SubElement(c, f"{{{XL_NS_MAIN}}}is")
+            t_el = ET.SubElement(is_el, f"{{{XL_NS_MAIN}}}t")
+            t_el.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+            t_el.text = txt
             row_el.append(c)
 
         sheetData.append(row_el)
 
     # Update dimension
-    dim = root.find(f"{{{XL_NS_MAIN}}}dimension") or ET.SubElement(root, f"{{{XL_NS_MAIN}}}dimension", ref="A1:A1")
+    dim = root.find(f"{{{XL_NS_MAIN}}}dimension")
+    if dim is None:
+        dim = ET.SubElement(root, f"{{{XL_NS_MAIN}}}dimension", ref="A1:A1")
     last_row = max(header_row, start_row + max(0, n_rows) - 1)
-    dim.set("ref", _union_dimension(dim.attrib.get("ref","A1:A1"), used_cols_final, last_row))
+    dim.set("ref", _union_dimension(dim.attrib.get("ref", "A1:A1"), used_cols_final, last_row))
 
-    # Update autoFilter if exists
+    # Keep autoFilter range in sync if present
     af = root.find(f"{{{XL_NS_MAIN}}}autoFilter")
     if af is not None:
         af.set("ref", f"A{header_row}:{_col_letter(used_cols_final)}{last_row}")
 
-    # Clear filterMode
+    # Clear filterMode if set
     sheetPr = root.find(f"{{{XL_NS_MAIN}}}sheetPr")
     if sheetPr is not None and sheetPr.attrib.get("filterMode"):
         sheetPr.attrib.pop("filterMode", None)
@@ -287,7 +291,7 @@ with c1:
 with c2:
     onboarding_file = st.file_uploader("🧾 Onboarding Sheet (.xlsx)", type=["xlsx"], help="Upload the onboarding data")
 
-# Category picker shown immediately after onboarding upload
+# Pre-run Category Filter UI (before Generate)
 st.markdown("#### 🔎 Row filter (by category)")
 if onboarding_file is not None:
     try:
@@ -303,29 +307,20 @@ if onboarding_file is not None:
             if score > best_score:
                 best_df, best_sheet, best_score = df, sh, score
         if best_df is not None:
-            headers = list(best_df.columns)
-            cat_candidates = [h for h in headers if norm(h) in {"target category","category","walmart category"}] \
-                             or [h for h in headers if "category" in h.lower()]
+            on_headers_preview = list(best_df.columns)
+            cat_candidates = [h for h in on_headers_preview if "category" in h.lower()]
             if cat_candidates:
-                default_col = st.session_state.get("cat_col")
-                if default_col not in cat_candidates:
-                    default_col = cat_candidates[0]
-                cat_col = st.selectbox("Category column", options=cat_candidates,
-                                       index=cat_candidates.index(default_col) if default_col in cat_candidates else 0,
-                                       key="cat_col")
-                vals = sorted({str(v).strip() for v in best_df[cat_col].astype(str)
-                               if str(v).strip() not in ("","nan","none")})
-                fname = (masterfile_file.name or "").lower() if masterfile_file is not None else ""
-                guess = [v for v in vals if v.lower() in fname]
-                st.session_state.cat_values = st.multiselect("Include only these categories",
-                                                             options=vals,
-                                                             default=st.session_state.get("cat_values", guess),
-                                                             key="cat_values")
-                st.caption("Selected categories will be applied when you click Generate.")
+                st.session_state.cat_col = st.selectbox("Category column", options=cat_candidates, key="cat_col_select")
+                vals = sorted({str(v).strip() for v in best_df[st.session_state.cat_col].astype(str) if str(v).strip() not in ("","nan","none")})
+                default_guess = []
+                if masterfile_file is not None:
+                    fname = (masterfile_file.name or "").lower()
+                    default_guess = [v for v in vals if v.lower() in fname]
+                st.session_state.cat_values = st.multiselect("Include only these categories", options=vals, default=default_guess, key="cat_vals_select")
             else:
-                st.info("No column containing “category” found in the uploaded sheet.")
+                st.info("No column containing “category” detected in the onboarding preview.")
         else:
-            st.info("Couldn’t read the onboarding file preview.")
+            st.info("Couldn’t read the onboarding sheet yet.")
     except Exception:
         st.info("Upload the onboarding file to enable category filtering.")
 else:
@@ -371,7 +366,7 @@ if go:
         mime_map = {".xlsx":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xlsm":"application/vnd.ms-excel.sheet.macroEnabled.12"}
         out_mime = mime_map.get(ext, mime_map[".xlsx"])
 
-        # Step 1
+        # Parse mapping JSON
         slog("⏳ **Step 1/6:** Parsing mapping JSON...", 0.1)
         try:
             if mapping_json_text.strip(): mapping_raw = json.loads(mapping_json_text)
@@ -389,7 +384,7 @@ if go:
             mapping_aliases[norm(k)] = aliases
         slog(f"✅ Loaded {len(mapping_aliases)} header mappings", 0.2)
 
-        # Step 2
+        # Read template headers
         slog("⏳ **Step 2/6:** Reading template headers...", 0.3)
         masterfile_file.seek(0); master_bytes = masterfile_file.read()
         t0=time.time()
@@ -405,7 +400,7 @@ if go:
         wb_ro.close()
         slog(f"✅ Loaded {used_cols} columns from template in {time.time()-t0:.2f}s", 0.4)
 
-        # Step 3
+        # Read onboarding sheet (best sheet detection)
         slog("⏳ **Step 3/6:** Analyzing onboarding sheet...", 0.5)
         try:
             best_xl = pd.ExcelFile(onboarding_file)
@@ -432,7 +427,7 @@ if go:
         on_headers = list(on_df.columns)
         st.success(f"✅ Using onboarding sheet: **{best_sheet}** ({info})")
 
-        # Apply category filter from pre-upload UI
+        # Apply preselected category filter
         cat_col = st.session_state.get("cat_col")
         cat_vals = st.session_state.get("cat_values")
         if cat_col and cat_vals and cat_col in on_df.columns:
@@ -440,7 +435,7 @@ if go:
             on_df = on_df[on_df[cat_col].astype(str).str.strip().isin(cat_vals)].copy()
             st.info(f"Filtering on **{cat_col}** ∈ {cat_vals} → kept {len(on_df)}/{_before} rows.")
 
-        # Step 4
+        # Mapping
         slog("⏳ **Step 4/6:** Mapping columns...", 0.6)
         series_by_alias = {norm(h): on_df[h] for h in on_headers}
         report_lines = ["#### 🔎 Column Mapping Results"]
@@ -463,7 +458,7 @@ if go:
         st.markdown("\n".join(report_lines))
         st.info(f"📊 Mapping Stats: **{matched_count} matched**, **{unmatched_count} unmatched** out of {len(display_headers)} total columns")
 
-        # Step 5
+        # Build block
         slog("⏳ **Step 5/6:** Building data block...", 0.7)
         n_rows = len(on_df)
         block = [[""] * used_cols for _ in range(n_rows)]
@@ -475,7 +470,7 @@ if go:
                     block[i][col-1] = v
         slog(f"✅ Built data block: {n_rows} rows × {used_cols} columns", 0.8)
 
-        # Step 6
+        # Write file
         slog("⏳ **Step 6/6:** Writing final masterfile via fast XML...", 0.85)
         t_write=time.time()
         out_bytes = fast_patch_template(master_bytes=master_bytes, sheet_name=MASTER_TEMPLATE_SHEET, header_row=MASTER_DISPLAY_ROW, start_row=MASTER_DATA_START_ROW, used_cols=used_cols, block_2d=block)
