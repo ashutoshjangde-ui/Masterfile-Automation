@@ -22,7 +22,7 @@ st.markdown("""
 .badge{display:inline-block; padding:4px 10px; border-radius:999px; font-size:.82rem; font-weight:600; margin-right:.25rem;}
 .badge-info{background:#eef2ff;color:#1e40af;} .badge-ok{background:#ecfdf5;color:#065f46;} .badge-target{background:#fff0f0;color:#cc0000;}
 div.stButton>button,.stDownloadButton>button{background:var(--accent)!important;color:#fff!important;border-radius:10px!important;border:0!important;font-weight:600!important;padding:0.5rem 1.5rem!important;transition:all .3s ease!important;}
-div.stButton>button:hover,.stDownloadButton>button:hover{transform:translateY(-2px);box-shadow:0 4px 12px rgba(0,0,0,0.3)!important;}
+div.stButton>button:hover,.stDownloadButton>button:hover{transform:translateY(-2px);box-shadow:0 4px 12px rgba(204,0,0,0.3)!important;}
 h1{color:var(--accent);}
 </style>
 """, unsafe_allow_html=True)
@@ -84,7 +84,7 @@ def safe_filename(name: str, fallback: str = "final_masterfile"):
     name = re.sub(r"[^A-Za-z0-9._ -]+", "", name.strip())
     return name or fallback
 
-# ── ZIP / XML patchers (unchanged) ───────────────────────────────────
+# ── ZIP / XML patchers ───────────────────────────────────────────────
 def _find_sheet_part_path(z: zipfile.ZipFile, sheet_name: str) -> str:
     wb_xml = ET.fromstring(z.read("xl/workbook.xml"))
     rels_xml = ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))
@@ -151,41 +151,74 @@ def _intersects_range(a1: str, r1: int, r2: int) -> bool:
     return not (hi<r1 or lo>r2)
 
 def _patch_sheet_xml(sheet_xml_bytes: bytes, header_row: int, start_row: int, used_cols_final: int, block_2d: list) -> bytes:
+    """
+    Write rows using inlineStr ONLY for non-empty cells.
+    Empty cells are emitted as minimal <c r="A1"/> which avoids Excel 'recovered content' warnings.
+    """
     root = ET.fromstring(sheet_xml_bytes); _ensure_ws_x14ac(root)
     sheetData = root.find(f"{{{XL_NS_MAIN}}}sheetData") or ET.SubElement(root, f"{{{XL_NS_MAIN}}}sheetData")
+
+    # Remove existing data rows from start_row downwards
     for row in list(sheetData):
         try: r=int(row.attrib.get("r") or "0")
         except: r=0
-        if r>=start_row: sheetData.remove(row)
+        if r >= start_row:
+            sheetData.remove(row)
+
+    # Remove intersecting merge cells
     mergeCells = root.find(f"{{{XL_NS_MAIN}}}mergeCells")
     if mergeCells is not None:
         for mc in list(mergeCells):
             if _intersects_range(mc.attrib.get("ref",""), start_row, 1048576):
                 mergeCells.remove(mc)
-        if len(list(mergeCells))==0: root.remove(mergeCells)
+        if len(list(mergeCells)) == 0:
+            root.remove(mergeCells)
+
+    # Rebuild data rows
     row_span = f"1:{used_cols_final}" if used_cols_final>0 else "1:1"
-    n_rows=len(block_2d)
+    n_rows = len(block_2d)
+
     for i in range(n_rows):
-        r=start_row+i; src_row=block_2d[i]
+        r = start_row + i
+        src_row = block_2d[i]
         row_el = ET.Element(f"{{{XL_NS_MAIN}}}row", r=str(r))
         row_el.set("spans", row_span)
         row_el.set("{http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac}dyDescent", "0.25")
+
         for j in range(used_cols_final):
             val = src_row[j] if j < len(src_row) else ""
             txt = sanitize_xml_text(val) if val else ""
-            col = _col_letter(j+1)
-            c = ET.Element(f"{{{XL_NS_MAIN}}}c", r=f"{col}{r}", t="inlineStr")
-            is_el = ET.SubElement(c, f"{{{XL_NS_MAIN}}}is")
-            t_el = ET.SubElement(is_el, f"{{{XL_NS_MAIN}}}t"); t_el.set("{http://www.w3.org/XML/1998/namespace}space","preserve"); t_el.text = txt
+            col = _col_letter(j + 1)
+
+            if txt == "":
+                # emit empty cell without inline string payload
+                c = ET.Element(f"{{{XL_NS_MAIN}}}c", r=f"{col}{r}")
+            else:
+                c = ET.Element(f"{{{XL_NS_MAIN}}}c", r=f"{col}{r}", t="inlineStr")
+                is_el = ET.SubElement(c, f"{{{XL_NS_MAIN}}}is")
+                t_el = ET.SubElement(is_el, f"{{{XL_NS_MAIN}}}t")
+                t_el.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+                t_el.text = txt
+
             row_el.append(c)
+
         sheetData.append(row_el)
+
+    # Update dimension
     dim = root.find(f"{{{XL_NS_MAIN}}}dimension") or ET.SubElement(root, f"{{{XL_NS_MAIN}}}dimension", ref="A1:A1")
     last_row = max(header_row, start_row + max(0, n_rows) - 1)
     dim.set("ref", _union_dimension(dim.attrib.get("ref","A1:A1"), used_cols_final, last_row))
+
+    # Update autoFilter if exists
     af = root.find(f"{{{XL_NS_MAIN}}}autoFilter")
-    if af is not None: af.set("ref", f"A{header_row}:{_col_letter(used_cols_final)}{last_row}")
+    if af is not None:
+        af.set("ref", f"A{header_row}:{_col_letter(used_cols_final)}{last_row}")
+
+    # Clear filterMode
     sheetPr = root.find(f"{{{XL_NS_MAIN}}}sheetPr")
-    if sheetPr is not None and sheetPr.attrib.get("filterMode"): sheetPr.attrib.pop("filterMode", None)
+    if sheetPr is not None and sheetPr.attrib.get("filterMode"):
+        sheetPr.attrib.pop("filterMode", None)
+
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 def _patch_table_xml(table_xml_bytes: bytes, header_row: int, last_row: int, last_col_n: int) -> bytes:
@@ -254,12 +287,11 @@ with c1:
 with c2:
     onboarding_file = st.file_uploader("🧾 Onboarding Sheet (.xlsx)", type=["xlsx"], help="Upload the onboarding data")
 
-# ── NEW: Category picker immediately after onboarding upload ─────────
+# Category picker shown immediately after onboarding upload
 st.markdown("#### 🔎 Row filter (by category)")
 if onboarding_file is not None:
     try:
         xl = pd.ExcelFile(onboarding_file)
-        # choose the sheet with the strongest "category" signal (no mapping needed)
         best_df, best_sheet, best_score = None, None, -1
         for sh in xl.sheet_names:
             try:
@@ -270,23 +302,25 @@ if onboarding_file is not None:
             score = sum(("category" in c.lower()) for c in df.columns)
             if score > best_score:
                 best_df, best_sheet, best_score = df, sh, score
-
         if best_df is not None:
             headers = list(best_df.columns)
-            cat_candidates = [h for h in headers if norm(h) in {"target category", "category", "walmart category"}] \
+            cat_candidates = [h for h in headers if norm(h) in {"target category","category","walmart category"}] \
                              or [h for h in headers if "category" in h.lower()]
-
             if cat_candidates:
-                # preselect previously chosen column if available
                 default_col = st.session_state.get("cat_col")
                 if default_col not in cat_candidates:
                     default_col = cat_candidates[0]
-                cat_col = st.selectbox("Category column", options=cat_candidates, index=cat_candidates.index(default_col) if default_col in cat_candidates else 0, key="cat_col")
-                vals = sorted({str(v).strip() for v in best_df[cat_col].astype(str) if str(v).strip() not in ("","nan","none")})
-                # guess from template filename
+                cat_col = st.selectbox("Category column", options=cat_candidates,
+                                       index=cat_candidates.index(default_col) if default_col in cat_candidates else 0,
+                                       key="cat_col")
+                vals = sorted({str(v).strip() for v in best_df[cat_col].astype(str)
+                               if str(v).strip() not in ("","nan","none")})
                 fname = (masterfile_file.name or "").lower() if masterfile_file is not None else ""
                 guess = [v for v in vals if v.lower() in fname]
-                st.session_state.cat_values = st.multiselect("Include only these categories", options=vals, default=st.session_state.get("cat_values", guess), key="cat_values")
+                st.session_state.cat_values = st.multiselect("Include only these categories",
+                                                             options=vals,
+                                                             default=st.session_state.get("cat_values", guess),
+                                                             key="cat_values")
                 st.caption("Selected categories will be applied when you click Generate.")
             else:
                 st.info("No column containing “category” found in the uploaded sheet.")
@@ -296,7 +330,6 @@ if onboarding_file is not None:
         st.info("Upload the onboarding file to enable category filtering.")
 else:
     st.info("Upload the onboarding file to enable category filtering.")
-# ── END NEW ──────────────────────────────────────────────────────────
 
 st.markdown("#### 🔗 Mapping JSON")
 st.caption("Define how onboarding columns map to masterfile headers")
@@ -399,7 +432,7 @@ if go:
         on_headers = list(on_df.columns)
         st.success(f"✅ Using onboarding sheet: **{best_sheet}** ({info})")
 
-        # APPLY previously chosen category filter (from pre-upload UI)
+        # Apply category filter from pre-upload UI
         cat_col = st.session_state.get("cat_col")
         cat_vals = st.session_state.get("cat_values")
         if cat_col and cat_vals and cat_col in on_df.columns:
