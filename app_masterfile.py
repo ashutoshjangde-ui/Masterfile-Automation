@@ -83,20 +83,17 @@ def safe_filename(name: str, fallback: str = "final_masterfile"):
     name = re.sub(r"[^A-Za-z0-9._ -]+", "", name.strip())
     return name or fallback
 
-# === Gender inference additions (uses your SEO attribute aliases) ====
-_GENDER_W = re.compile(r"\b(women|womens|women's|woman|female|lad(?:y|ies))\b", re.I)
-_GENDER_M = re.compile(r"\b(men|mens|men's|man|male|gent(?:lemen)?)\b", re.I)
+# ── Gender inference helpers (added) ─────────────────────────────────
+_APOS = r"[’']"  # straight/curly apostrophes
+_GENDER_W = re.compile(rf"\b(women(?:{_APOS}s)?|woman|female|lad(?:y|ies))\b", re.I)
+_GENDER_M = re.compile(rf"\b(men(?:{_APOS}s)?|man|male|gent(?:lemen)?)\b", re.I)
+_UNISEX   = re.compile(r"\b(unisex|all genders|everyone|for all|men\s*&\s*women|women\s*&\s*men)\b", re.I)
 
-def infer_gender_from_text(text: str) -> str:
-    t = (text or "").lower()
-    has_w = bool(_GENDER_W.search(t))
-    has_m = bool(_GENDER_M.search(t))
-    if has_w and has_m: return "Gender Neutral"
-    if has_w: return "Women"
-    if has_m: return "Men"
-    return "Gender Neutral"
+def _has_w(text: str) -> bool: return bool(_GENDER_W.search((text or "")))
+def _has_m(text: str) -> bool: return bool(_GENDER_M.search((text or "")))
+def _is_unisex(text: str) -> bool: return bool(_UNISEX.search((text or "").lower()))
 
-# Your explicit attribute→alias mapping for SEO text
+# Your SEO field mapping for analysis priority
 SEO_ALIASES = {
     "Product Name": ["Product Name", "item_name", "Item Name", "Walmart Title - en-US", "Title"],
     "Description": ["Product Description", "Description", "long_description", "Walmart Description - en-US"],
@@ -108,8 +105,6 @@ SEO_ALIASES = {
 }
 
 def select_seo_columns(df: pd.DataFrame) -> list[str]:
-    """Pick columns from df that match your provided alias lists (first hit per group).
-       Falls back to title/description/bullet heuristics, then to all columns if needed."""
     header_lookup = {norm(c): c for c in df.columns}
     picks = []
     for _, aliases in SEO_ALIASES.items():
@@ -117,15 +112,44 @@ def select_seo_columns(df: pd.DataFrame) -> list[str]:
             key = norm(alias)
             if key in header_lookup:
                 picks.append(header_lookup[key])
-                break  # only one column per group
-    # dedupe, preserve order
-    seen = set(); picks = [c for c in picks if not (c in seen or seen.add(c))]
+                break
+    seen = set()
+    picks = [c for c in picks if not (c in seen or seen.add(c))]
     if picks:
         return picks
-    # soft fallback if nothing matched
-    heur = [c for c in df.columns if any(k in norm(c) for k in ["title","description","bullet","feature","name"])]
+    heur = [c for c in df.columns if any(k in norm(c) for k in ["title","product name","description","bullet","feature","name"])]
     return heur if heur else list(df.columns)
-# ====================================================================
+
+def _column_priority_score(col_name: str) -> int:
+    n = norm(col_name)
+    if "title" in n or "product name" in n: return 3  # highest
+    if "bullet" in n or "feature" in n:     return 2
+    if "description" in n:                   return 1
+    return 0
+
+def order_seo_columns(cols: list[str]) -> list[str]:
+    return sorted(cols, key=_column_priority_score, reverse=True)
+
+def infer_gender_from_columns(row: pd.Series, ordered_cols: list[str]) -> str:
+    # unisex first
+    for c in ordered_cols:
+        t = str(row.get(c, ""))
+        if _is_unisex(t):
+            return "Gender Neutral"
+    any_w = False; any_m = False
+    for c in ordered_cols:
+        t = str(row.get(c, ""))
+        w = _has_w(t); m = _has_m(t)
+        any_w = any_w or w
+        any_m = any_m or m
+        if w and not m:
+            return "Women"
+        if m and not w:
+            return "Men"
+    if any_w and any_m: return "Gender Neutral"
+    if any_w: return "Women"
+    if any_m: return "Men"
+    return "Gender Neutral"
 
 # ── ZIP / XML helpers ────────────────────────────────────────────────
 def _find_sheet_part_path(z: zipfile.ZipFile, sheet_name: str) -> str:
@@ -453,22 +477,19 @@ if go:
         else:
             st.warning("No category column detected — no filtering applied.")
 
-        # === Step 3.7: infer Gender from SEO text (USING YOUR ALIASES) ===
+        # Step 3.7: infer Gender from SEO columns (added)
         try:
             seo_cols = select_seo_columns(on_df)
-            text_series = on_df[seo_cols].astype(str).agg(" ".join, axis=1)
-            on_df["Gender"] = text_series.apply(infer_gender_from_text)
+            ordered = order_seo_columns(seo_cols)
+            on_df["Gender"] = on_df.apply(lambda r: infer_gender_from_columns(r, ordered), axis=1)
         except Exception:
             on_df["Gender"] = "Gender Neutral"
-        # =================================================================
+        # refresh headers so mapping sees "Gender"
+        on_headers = list(on_df.columns)
 
         # Step 4: mapping
         slog("⏳ **Step 4/6:** Mapping columns...", 0.6)
         series_by_alias = {norm(h): on_df[h] for h in on_headers}
-        # make sure inferred Gender is always available to the mapper
-        if "Gender" in on_df.columns:
-            series_by_alias["gender"] = on_df["Gender"]
-
         report_lines = ["#### 🔎 Column Mapping Results"]
         master_to_source = {}; matched_count=0; unmatched_count=0
         for c, (disp, sec) in enumerate(zip(display_headers, secondary_headers), start=1):
@@ -483,7 +504,7 @@ if go:
                 master_to_source[c]=resolved; matched_count+=1
                 report_lines.append(f"- ✅ **{eff}** ← `{matched_alias}`")
             else:
-                sugg = top_matches(eff, list(on_df.columns) + ["Gender"], 3)
+                sugg = top_matches(eff, on_headers, 3)
                 sug_txt = ", ".join(f"`{name}` ({round(sc*100,1)}%)" for sc,name in sugg) if sugg else "*none*"
                 report_lines.append(f"- ❌ **{eff}** ← _no match_. Suggestions: {sug_txt}"); unmatched_count+=1
         st.markdown("\n".join(report_lines))
@@ -504,7 +525,7 @@ if go:
         # Step 6: write file
         slog("⏳ **Step 6/6:** Writing final masterfile via fast XML...", 0.85)
         out_bytes = fast_patch_template(master_bytes=master_bytes, sheet_name=MASTER_TEMPLATE_SHEET,
-                                        header_row=MASTER_DISPLAY_ROW, start_row=MASTER_DATA_START_ROW,
+                                        header_row=MASTER_DISPLAY_ROW, start_row=master_SECONDARY_ROW+1 if False else  MASTER_DATA_START_ROW,
                                         used_cols=used_cols, block_2d=block)
         st.success("🎉 **Complete!**")
         final_base = safe_filename(final_name_input, fallback="target_final_masterfile")
