@@ -83,9 +83,9 @@ def safe_filename(name: str, fallback: str = "final_masterfile"):
     name = re.sub(r"[^A-Za-z0-9._ -]+", "", name.strip())
     return name or fallback
 
-# === Gender inference additions (minimal) ============================
-_GENDER_W = re.compile(r"\b(women|womens|women's|woman|female|lad(y|ies))\b", re.I)
-_GENDER_M = re.compile(r"\b(men|mens|men's|man|male|gent(lemen)?)\b", re.I)
+# === Gender inference additions (uses your SEO attribute aliases) ====
+_GENDER_W = re.compile(r"\b(women|womens|women's|woman|female|lad(?:y|ies))\b", re.I)
+_GENDER_M = re.compile(r"\b(men|mens|men's|man|male|gent(?:lemen)?)\b", re.I)
 
 def infer_gender_from_text(text: str) -> str:
     t = (text or "").lower()
@@ -96,12 +96,35 @@ def infer_gender_from_text(text: str) -> str:
     if has_m: return "Men"
     return "Gender Neutral"
 
-def guess_seo_columns(cols):
-    names = [str(c) for c in cols]
-    picks = [c for c in names if any(k in norm(c) for k in [
-        "title","product title","item name","name","product name",
-        "description","product description","bullet","feature","highlights"])]
-    return picks if picks else names  # safe fallback
+# Your explicit attribute→alias mapping for SEO text
+SEO_ALIASES = {
+    "Product Name": ["Product Name", "item_name", "Item Name", "Walmart Title - en-US", "Title"],
+    "Description": ["Product Description", "Description", "long_description", "Walmart Description - en-US"],
+    "bullet_point1": ["Bullet point 1","bullet_point1", "Bullet Feature 1", "bullet point 1", "bullet_point1 - en-US", "Key Features #1 - en-US"],
+    "bullet_point2": ["Bullet point 2","bullet_point2", "Bullet Feature 2", "bullet point 2", "bullet_point2 - en-US", "Key Features #2 - en-US"],
+    "bullet_point3": ["Bullet point 3","bullet_point3", "Bullet Feature 3", "bullet point 3", "bullet_point3 - en-US", "Key Features #3 - en-US"],
+    "bullet_point4": ["Bullet point 4","bullet_point4", "Bullet Feature 4", "bullet point 4", "bullet_point4 - en-US", "Key Features #4 - en-US"],
+    "bullet_point5": ["Bullet point 5","bullet_point5", "Bullet Feature 5", "bullet point 5", "bullet_point5 - en-US", "Key Features #5 - en-US"],
+}
+
+def select_seo_columns(df: pd.DataFrame) -> list[str]:
+    """Pick columns from df that match your provided alias lists (first hit per group).
+       Falls back to title/description/bullet heuristics, then to all columns if needed."""
+    header_lookup = {norm(c): c for c in df.columns}
+    picks = []
+    for _, aliases in SEO_ALIASES.items():
+        for alias in aliases:
+            key = norm(alias)
+            if key in header_lookup:
+                picks.append(header_lookup[key])
+                break  # only one column per group
+    # dedupe, preserve order
+    seen = set(); picks = [c for c in picks if not (c in seen or seen.add(c))]
+    if picks:
+        return picks
+    # soft fallback if nothing matched
+    heur = [c for c in df.columns if any(k in norm(c) for k in ["title","description","bullet","feature","name"])]
+    return heur if heur else list(df.columns)
 # ====================================================================
 
 # ── ZIP / XML helpers ────────────────────────────────────────────────
@@ -430,15 +453,14 @@ if go:
         else:
             st.warning("No category column detected — no filtering applied.")
 
-        # === Step 3.7: infer Gender from SEO text (ADDED) =============
+        # === Step 3.7: infer Gender from SEO text (USING YOUR ALIASES) ===
         try:
-            seo_cols = guess_seo_columns(on_df.columns)
+            seo_cols = select_seo_columns(on_df)
             text_series = on_df[seo_cols].astype(str).agg(" ".join, axis=1)
             on_df["Gender"] = text_series.apply(infer_gender_from_text)
         except Exception:
-            # safe fallback: if anything goes wrong, default to Gender Neutral
             on_df["Gender"] = "Gender Neutral"
-        # ===============================================================
+        # =================================================================
 
         # Step 4: mapping
         slog("⏳ **Step 4/6:** Mapping columns...", 0.6)
