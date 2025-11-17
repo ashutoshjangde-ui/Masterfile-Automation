@@ -83,6 +83,27 @@ def safe_filename(name: str, fallback: str = "final_masterfile"):
     name = re.sub(r"[^A-Za-z0-9._ -]+", "", name.strip())
     return name or fallback
 
+# === Gender inference additions (minimal) ============================
+_GENDER_W = re.compile(r"\b(women|womens|women's|woman|female|lad(y|ies))\b", re.I)
+_GENDER_M = re.compile(r"\b(men|mens|men's|man|male|gent(lemen)?)\b", re.I)
+
+def infer_gender_from_text(text: str) -> str:
+    t = (text or "").lower()
+    has_w = bool(_GENDER_W.search(t))
+    has_m = bool(_GENDER_M.search(t))
+    if has_w and has_m: return "Gender Neutral"
+    if has_w: return "Women"
+    if has_m: return "Men"
+    return "Gender Neutral"
+
+def guess_seo_columns(cols):
+    names = [str(c) for c in cols]
+    picks = [c for c in names if any(k in norm(c) for k in [
+        "title","product title","item name","name","product name",
+        "description","product description","bullet","feature","highlights"])]
+    return picks if picks else names  # safe fallback
+# ====================================================================
+
 # ── ZIP / XML helpers ────────────────────────────────────────────────
 def _find_sheet_part_path(z: zipfile.ZipFile, sheet_name: str) -> str:
     wb_xml = ET.fromstring(z.read("xl/workbook.xml"))
@@ -409,9 +430,23 @@ if go:
         else:
             st.warning("No category column detected — no filtering applied.")
 
+        # === Step 3.7: infer Gender from SEO text (ADDED) =============
+        try:
+            seo_cols = guess_seo_columns(on_df.columns)
+            text_series = on_df[seo_cols].astype(str).agg(" ".join, axis=1)
+            on_df["Gender"] = text_series.apply(infer_gender_from_text)
+        except Exception:
+            # safe fallback: if anything goes wrong, default to Gender Neutral
+            on_df["Gender"] = "Gender Neutral"
+        # ===============================================================
+
         # Step 4: mapping
         slog("⏳ **Step 4/6:** Mapping columns...", 0.6)
         series_by_alias = {norm(h): on_df[h] for h in on_headers}
+        # make sure inferred Gender is always available to the mapper
+        if "Gender" in on_df.columns:
+            series_by_alias["gender"] = on_df["Gender"]
+
         report_lines = ["#### 🔎 Column Mapping Results"]
         master_to_source = {}; matched_count=0; unmatched_count=0
         for c, (disp, sec) in enumerate(zip(display_headers, secondary_headers), start=1):
@@ -426,7 +461,7 @@ if go:
                 master_to_source[c]=resolved; matched_count+=1
                 report_lines.append(f"- ✅ **{eff}** ← `{matched_alias}`")
             else:
-                sugg = top_matches(eff, on_headers, 3)
+                sugg = top_matches(eff, list(on_df.columns) + ["Gender"], 3)
                 sug_txt = ", ".join(f"`{name}` ({round(sc*100,1)}%)" for sc,name in sugg) if sugg else "*none*"
                 report_lines.append(f"- ❌ **{eff}** ← _no match_. Suggestions: {sug_txt}"); unmatched_count+=1
         st.markdown("\n".join(report_lines))
