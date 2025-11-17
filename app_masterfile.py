@@ -576,3 +576,4 @@ if go:
         with st.expander("🐛 See full error details"): st.exception(e)
     finally:
         st.markdown("</div>", unsafe_allow_html=True)
+
