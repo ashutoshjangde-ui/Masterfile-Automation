@@ -150,7 +150,7 @@ def infer_gender_from_columns(row: pd.Series, ordered_cols: list[str]) -> str:
     if any_m: return "Men"
     return "Gender Neutral"
 
-# ── Health & Beauty Subtype (already present) ────────────────────────
+# ── Health & Beauty Subtype (existing) ───────────────────────────────
 _EXCLUDE_NON_POWDER = re.compile(r"\b(protein\s+bar|protein\s+cookie|protein\s+shake|ready[-\s]?to[-\s]?drink|rtd)\b", re.I)
 _HB_SUBTYPE_PATTERNS = {
     "Collagen": [r"\bcollagen\b", r"\bcollagen\s+peptid(e|es)\b", r"\bhydrol(y|i)zed\s+collagen\b", r"\bmarine\s+collagen\b", r"\btype\s*(i|ii|iii)\b"],
@@ -188,7 +188,7 @@ def infer_hb_subtype_from_columns(row: pd.Series, ordered_cols: list[str]) -> st
     picks.sort(key=lambda kv: (-kv[1], kv[0]))
     return "|".join([k for k, _ in picks[:3]])  # max 3
 
-# ── NEW: Health Application* inference (ONLY CHANGE ADDED) ──────────
+# ── Health Application* (existing from prior step) ───────────────────
 _HEALTH_APP_LABELS = [
     "Adrenal Health","Aging","Allergies","Anxiety","Bladder Infection","Bladder Support","Bloating","Blood Clots",
     "Blood Sugar Imbalance","Bone Health","Children's Health","Cholesterol Level Maintenance","Circulatory System Health",
@@ -205,20 +205,15 @@ _HEALTH_APP_LABELS = [
     "Urinary Health","Urinary Tract Infection","Vaginal Health","Vertigo","Water Retention","Weight Loss",
     "Weight Management","Women's Health","Yeast Infection"
 ]
-
-# Base pattern builder and synonyms to improve recall
 def _make_base_pat(label: str) -> str:
     s = label.lower()
-    s = s.replace("children's", r"children(?:'s)?")
-    s = s.replace("men's", r"men(?:'s)?")
-    s = s.replace("women's", r"women(?:'s)?")
-    s = re.sub(r"\s*\(.*?\)\s*", "", s)  # drop parenthetical like (IBS)
+    s = s.replace("children's", r"children(?:'s)?").replace("men's", r"men(?:'s)?").replace("women's", r"women(?:'s)?")
+    s = re.sub(r"\s*\(.*?\)\s*", "", s)
     tokens = re.split(r"[^a-z0-9]+", s.strip())
     tokens = [re.escape(t) for t in tokens if t]
     if not tokens: 
         return r"$^"
     return r"\b" + r"\W+".join(tokens) + r"\b"
-
 _HEALTH_APP_SYNONYMS = {
     "Digestive Health": [r"\bdigesti(ve|on)\b", r"\bgut\s+health\b"],
     "Immune System Health": [r"\bimmune(\s+system)?\s+health\b", r"\bimmune\s+support\b", r"\bimmunity\s+support\b", r"\bboost\s+immun"],
@@ -256,22 +251,15 @@ _HEALTH_APP_SYNONYMS = {
     "Mood": [r"\bmood\b"],
     "Metabolism": [r"\bmetaboli[sc]m\b"],
 }
-
 _HEALTH_APP_REGEX = {}
 for label in _HEALTH_APP_LABELS:
     pats = [ _make_base_pat(label) ]
     pats.extend(_HEALTH_APP_SYNONYMS.get(label, []))
     _HEALTH_APP_REGEX[label] = [re.compile(p, re.I) for p in pats]
-
 def _health_score(text: str, comp_list) -> int:
     if not text: return 0
     return sum(1 for rx in comp_list if rx.search(text))
-
 def infer_health_app_from_columns(row: pd.Series, ordered_cols: list[str]) -> str:
-    """
-    Returns 0–5 labels joined by '|', picking highest scores first.
-    Weighted by SEO column importance: Title(3) > Bullets(2) > Description(1).
-    """
     scores = {label:0 for label in _HEALTH_APP_REGEX.keys()}
     for c in ordered_cols:
         txt = str(row.get(c, "")) or ""
@@ -286,8 +274,74 @@ def infer_health_app_from_columns(row: pd.Series, ordered_cols: list[str]) -> st
     if not picks:
         return ""
     picks.sort(key=lambda kv: (-kv[1], kv[0]))
-    # Max selections 3–5 → we allow up to 5; fewer is fine if fewer detected
-    return "|".join([k for k, _ in picks[:5]])
+    return "|".join([k for k, _ in picks[:5]])  # ≤5
+
+# ── NEW: Targeted Audience* inference ────────────────────────────────
+# Values: Adult, Infant, Kids, Teen  (choose 1; fallback Adult)
+_AUD_PAT = {
+    "Infant": [r"\bbaby|babies|infant|newborn\b", r"\b0\s*[-–]?\s*12\s*(m|mos|months)\b"],
+    "Kids":   [r"\bkid(s)?\b", r"\bchild(ren)?\b", r"\btoddler(s)?\b", r"\bpre[-\s]?school\b"],
+    "Teen":   [r"\bteen(s|age|ager|agers)?\b", r"\byouth\b"],
+    "Adult":  [r"\badult(s)?\b"]
+}
+_AGE_YEARS_RX = re.compile(r"\b(\d{1,2})\s*(?:\+|plus)?\s*(?:y(?:rs?)?|years?)\b", re.I)
+_AGE_RANGE_YEARS_RX = re.compile(r"\b(\d{1,2})\s*[-–]\s*(\d{1,2})\s*(?:y(?:rs?)?|years?)\b", re.I)
+_AGE_MONTHS_RX = re.compile(r"\b(\d{1,2})\s*(?:m|mos|months?)\b", re.I)
+
+def _aud_bump(scores: dict, label: str, w: int = 1):
+    scores[label] = scores.get(label, 0) + w
+
+def _age_to_bucket(years: int | None = None, months: int | None = None) -> str | None:
+    if months is not None:
+        if months <= 24: return "Infant"
+        elif months <= 36: return "Kids"
+        else: return "Kids"
+    if years is not None:
+        if years <= 2: return "Infant"
+        if 3 <= years <= 12: return "Kids"
+        if 13 <= years <= 17: return "Teen"
+        if years >= 18: return "Adult"
+    return None
+
+def infer_targeted_audience(row: pd.Series, ordered_cols: list[str], gender_val: str = "") -> str:
+    scores = {"Adult":0, "Infant":0, "Kids":0, "Teen":0}
+    # Gender backstop → implies adult
+    if str(gender_val).strip() in ("Men","Women"):
+        _aud_bump(scores, "Adult", 2)
+
+    for c in ordered_cols:
+        txt = str(row.get(c, "")) or ""
+        if not txt: 
+            continue
+        w = _column_priority_score(c)  # Title 3 > Bullets 2 > Description 1
+        # Lexical bumps
+        for label, pats in _AUD_PAT.items():
+            for p in pats:
+                if re.search(p, txt, re.I):
+                    _aud_bump(scores, label, w)
+        # Ages (single)
+        for m in _AGE_YEARS_RX.finditer(txt):
+            y = int(m.group(1))
+            bucket = _age_to_bucket(years=y)
+            if bucket: _aud_bump(scores, bucket, w+1)
+        # Ages (range)
+        for m in _AGE_RANGE_YEARS_RX.finditer(txt):
+            y1, y2 = int(m.group(1)), int(m.group(2))
+            for y in (y1, y2):
+                bucket = _age_to_bucket(years=y)
+                if bucket: _aud_bump(scores, bucket, w+1)
+        # Months
+        for m in _AGE_MONTHS_RX.finditer(txt):
+            mo = int(m.group(1))
+            bucket = _age_to_bucket(months=mo)
+            if bucket: _aud_bump(scores, bucket, w+1)
+
+    # Pick best; tie-breaker prefers more specific over Adult
+    order = ["Infant","Kids","Teen","Adult"]
+    best = max(order, key=lambda lab: (scores.get(lab,0), -order.index(lab)))
+    if scores.get(best,0) == 0:
+        return "Adult"  # default fill if nothing detected
+    return best
 
 # ── ZIP / XML helpers ────────────────────────────────────────────────
 def _find_sheet_part_path(z: zipfile.ZipFile, sheet_name: str) -> str:
@@ -614,18 +668,23 @@ if go:
         else:
             st.warning("No category column detected — no filtering applied.")
 
-        # Step 3.7: infer Gender, Subtype, and Health Application from SEO columns  ← ONLY CHANGE IS NEW COLUMN
+        # Step 3.7: infer from SEO columns (Gender, Subtype, Health Apps, Targeted Audience, Legal) ── ONLY small additions here
         try:
             seo_cols = select_seo_columns(on_df)
             ordered = order_seo_columns(seo_cols)
             on_df["Gender"] = on_df.apply(lambda r: infer_gender_from_columns(r, ordered), axis=1)
             on_df["health and beauty subtype*"] = on_df.apply(lambda r: infer_hb_subtype_from_columns(r, ordered), axis=1)
-            # NEW: Health Application* (max 5, '|' delimited)
             on_df["Health Application*"] = on_df.apply(lambda r: infer_health_app_from_columns(r, ordered), axis=1)
+            # NEW: Targeted Audience* (Adult/Infant/Kids/Teen, default Adult)
+            on_df["Targeted Audience*"] = on_df.apply(lambda r: infer_targeted_audience(r, ordered, r.get("Gender","")), axis=1)
+            # NEW: Legally Required Information* (always filled)
+            on_df["Legally Required Information*"] = "Healthcare Disclaimer"
         except Exception:
             on_df["Gender"] = "Gender Neutral"
             on_df["health and beauty subtype*"] = ""
             on_df["Health Application*"] = ""
+            on_df["Targeted Audience*"] = "Adult"
+            on_df["Legally Required Information*"] = "Healthcare Disclaimer"
 
         # refresh headers so mapping sees the new columns
         on_headers = list(on_df.columns)
