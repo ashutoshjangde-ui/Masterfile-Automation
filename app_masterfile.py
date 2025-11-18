@@ -103,6 +103,7 @@ SEO_ALIASES = {
     "bullet_point4": ["Bullet point 4","bullet_point4", "Bullet Feature 4", "bullet point 4", "bullet_point4 - en-US", "Key Features #4 - en-US"],
     "bullet_point5": ["Bullet point 5","bullet_point5", "Bullet Feature 5", "bullet point 5", "bullet_point5 - en-US", "Key Features #5 - en-US"],
 }
+
 def select_seo_columns(df: pd.DataFrame):
     header_lookup = {norm(c): c for c in df.columns}
     picks = []
@@ -116,24 +117,28 @@ def select_seo_columns(df: pd.DataFrame):
     if picks: return picks
     heur = [c for c in df.columns if any(k in norm(c) for k in ["title","product name","description","bullet","feature","name"])]
     return heur if heur else list(df.columns)
+
 def _column_priority_score(col_name: str) -> int:
     n = norm(col_name)
-    if "title" in n or "product name" in n: return 3
-    if "bullet" in n or "feature" in n:     return 2
-    if "description" in n:                   return 1
-    return 0
-def order_seo_columns(cols): return sorted(cols, key=_column_priority_score, reverse=True)
+    if "title" in n or "product name" in n: return 6
+    if "bullet" in n or "feature" in n:     return 4
+    if "description" in n:                   return 2
+    return 1
 
+def order_seo_columns(cols): 
+    return sorted(cols, key=_column_priority_score, reverse=True)
+
+# ── Gender (final) ───────────────────────────────────────────────────
 def infer_gender_from_columns(row: pd.Series, ordered_cols) -> str:
-    # 1) TITLE-FIRST OVERRIDE
-    prim = [c for c in ordered_cols if _column_priority_score(c) == 3] or ordered_cols[:1]
-    prim_text = " ".join(str(row.get(c, "")) for c in prim)
-    pw, pm = _has_w(prim_text), _has_m(prim_text)
+    # Title override
+    titles = [c for c in ordered_cols if _column_priority_score(c) == 6] or ordered_cols[:1]
+    title_text = " ".join(str(row.get(c, "")) for c in titles)
+    pw, pm = _has_w(title_text), _has_m(title_text)
     if pw and not pm: return "Women"
     if pm and not pw: return "Men"
     if pw and pm:     return "Gender Neutral"
 
-    # 2) Otherwise consider unisex; then weighted signals
+    # Global check
     all_text = " ".join(str(row.get(c,"")) for c in ordered_cols)
     if _is_unisex(all_text): return "Gender Neutral"
 
@@ -144,46 +149,72 @@ def infer_gender_from_columns(row: pd.Series, ordered_cols) -> str:
     if any_m: return "Men"
     return "Gender Neutral"
 
-# ── Health & Beauty Subtype (multi: max 3, '|' delimiter) ────────────
+# ── Subtype candidates & patterns (multi, max 3) ─────────────────────
 SUBTYPE_VALUES = [
     "Collagen","Protein Powder","Multivitamins",
     "Vitamin A","Vitamin B","Vitamin C","Vitamin D","Vitamin E","Vitamin K"
 ]
-# Expanded coverage
-_COLLAGEN_RX = re.compile(r"\b(collagen|collagen\s+peptid(e|es)|hydroly(z|s)ed\s+collagen|type\s*(i|ii|iii)\b|marine\s+collagen)\b", re.I)
-_PROTEIN_POWDER_RX = re.compile(
-    r"(\bprotein\s+powder\b|\bwhey\b|\bcasein\b|\b(isolate|concentrate)\b|\bpea\s+protein\b|\bsoy\s+protein\b|\brice\s+protein\b|\bprotein\s+blend\b|\bmicellar\s+casein\b)",
-    re.I
-)
-_EXCLUDE_NON_POWDER = re.compile(r"\b(protein\s+bar|protein\s+shake|ready[-\s]?to[-\s]?drink|rt[dD])\b", re.I)
-_MULTI_RX   = re.compile(r"\bmulti[-\s]?vitamin(s)?\b", re.I)
-_VITA = {
-    "Vitamin A": [re.compile(r"\bvit(amin)?\s*a\b", re.I), re.compile(r"\bretinol\b", re.I)],
-    "Vitamin B": [re.compile(r"\bvit(amin)?\s*b(\d{1,2})?\b", re.I), re.compile(r"\bb[-\s]?complex\b", re.I)],
-    "Vitamin C": [re.compile(r"\bvit(amin)?\s*c\b", re.I), re.compile(r"\bascorb(ic|ate)\b", re.I)],
-    "Vitamin D": [re.compile(r"\bvit(amin)?\s*d\b", re.I), re.compile(r"\bd3\b", re.I), re.compile(r"\bd2\b", re.I), re.compile(r"\bcholecalciferol\b", re.I)],
-    "Vitamin E": [re.compile(r"\bvit(amin)?\s*e\b", re.I), re.compile(r"\btocopherol\b", re.I)],
-    "Vitamin K": [re.compile(r"\bvit(amin)?\s*k\b", re.I), re.compile(r"\bk2\b", re.I), re.compile(r"\bmenaquinone\b", re.I), re.compile(r"\bphylloquinone\b", re.I)],
+
+_EXCLUDE_NON_POWDER = re.compile(r"\b(protein\s+bar|protein\s+cookie|protein\s+shake|ready[-\s]?to[-\s]?drink|rtd)\b", re.I)
+
+SUBTYPE_PATTERNS = {
+    "Collagen": [
+        r"\bcollagen\b", r"\bcollagen\s+peptid(e|es)\b", r"\bhydrol(y|i)zed\s+collagen\b",
+        r"\bmarine\s+collagen\b", r"\btype\s*(i|ii|iii)\b"
+    ],
+    "Protein Powder": [
+        r"\bprotein\s+powder\b", r"\bwhey\b", r"\bcasein\b", r"\bmicellar\s+casein\b",
+        r"\b(isolate|concentrate)\b", r"\bpea\s+protein\b", r"\bsoy\s+protein\b", r"\brice\s+protein\b", r"\bprotein\s+blend\b"
+    ],
+    "Multivitamins": [
+        r"\bmult(i|i-)?vitamin(s)?\b", r"\bdaily\s+multivitamin(s)?\b", r"\bmulti[-\s]?vit\b"
+    ],
+    "Vitamin A": [r"\bvit(amin)?\s*a\b", r"\bretinol\b", r"\bretinyl\b"],
+    "Vitamin B": [
+        r"\bvit(amin)?\s*b(\d{1,2})?\b", r"\bb[-\s]?complex\b", r"\bthiamin(e)?\b", r"\briboflavin\b",
+        r"\bniacin(amide)?\b", r"\bpantothenic\b", r"\bpyridoxin(e)?\b", r"\bbiotin\b",
+        r"\bfolate\b", r"\bfolic\s+acid\b", r"\bcobalamin\b", r"\bB-?12\b", r"\bB-?6\b", r"\bB-?3\b"
+    ],
+    "Vitamin C": [r"\bvit(amin)?\s*c\b", r"\bascorb(ic|ate)\b", r"\bester[-\s]?c\b"],
+    "Vitamin D": [r"\bvit(amin)?\s*d\b", r"\bd-?3\b", r"\bd-?2\b", r"\bcholecalciferol\b", r"\bergocalciferol\b"],
+    "Vitamin E": [r"\bvit(amin)?\s*e\b", r"\btocopherol\b", r"\btocotrienol\b"],
+    "Vitamin K": [r"\bvit(amin)?\s*k\b", r"\bk-?2\b", r"\bmk-?\s?7\b", r"\bmenaquinone\b", r"\bphylloquinone\b"],
 }
-def _score_subtype_text(txt: str, weight: int, scores: dict):
-    if not txt: return
-    if _COLLAGEN_RX.search(txt): scores["Collagen"] = scores.get("Collagen",0)+weight
-    if _PROTEIN_POWDER_RX.search(txt) and not _EXCLUDE_NON_POWDER.search(txt):
-        scores["Protein Powder"] = scores.get("Protein Powder",0)+weight
-    if _MULTI_RX.search(txt): scores["Multivitamins"] = scores.get("Multivitamins",0)+weight
-    for k, pats in _VITA.items():
-        if any(p.search(txt) for p in pats):
-            scores[k] = scores.get(k,0)+weight
+
+def _score_patterns(text: str, patterns: list[str]) -> int:
+    if not text: return 0
+    score = 0
+    for p in patterns:
+        if re.search(p, text, re.I):
+            score += 1
+    return score
+
 def infer_hb_subtypes_multi(row: pd.Series, ordered_cols, top_k: int = 3) -> str:
     scores = {}
     for c in ordered_cols:
-        w = _column_priority_score(c) or 1
-        _score_subtype_text(str(row.get(c,"")), w, scores)
-    if not scores: return ""
-    picks = sorted(scores.items(), key=lambda x: (-x[1], x[0]))[:top_k]
-    return "|".join([p[0] for p in picks])
+        t = str(row.get(c, "")) or ""
+        if not t: 
+            continue
+        if _EXCLUDE_NON_POWDER.search(t):
+            # don't award Protein Powder points in bar/shake contexts unless explicit "powder"
+            pow_override = bool(re.search(r"\bprotein\s+powder\b", t, re.I))
+        else:
+            pow_override = True
 
-# ── Health Application (multi: max 5, '|' delimiter) ─────────────────
+        w = _column_priority_score(c)
+        for label, pats in SUBTYPE_PATTERNS.items():
+            if label == "Protein Powder" and not pow_override:
+                continue
+            scores[label] = scores.get(label, 0) + w * _score_patterns(t, pats)
+
+    # keep confident ones (>=2 total weighted hits), cap to top_k
+    picks = [(k,v) for k,v in scores.items() if v >= 2]
+    if not picks: 
+        return ""
+    picks.sort(key=lambda x: (-x[1], x[0]))
+    return "|".join([k for k,_ in picks[:top_k]])
+
+# ── Health Applications (multi, max 5) ───────────────────────────────
 HEALTH_APPS = [
 "Adrenal Health","Aging","Allergies","Anxiety","Bladder Infection","Bladder Support","Bloating",
 "Blood Clots","Blood Sugar Imbalance","Bone Health","Children's Health","Cholesterol Level Maintenance",
@@ -200,13 +231,14 @@ HEALTH_APPS = [
 "Testosterone Level","Thyroid Health","Tinnitus","Uric Acid Levels","Urinary Health","Urinary Tract Infection",
 "Vaginal Health","Vertigo","Water Retention","Weight Loss","Weight Management","Women's Health","Yeast Infection"
 ]
+
 APP_SYNONYMS = {
     "Immune System Health": [r"\bimmune\b", r"\bimmunity\b", r"\bimmune support\b"],
     "Digestive Health": [r"\bdigest(ion|ive)\b", r"\bgut health\b"],
     "Hair, Skin and Nail Health": [r"\bhair[, &and]*\s*skin[, &and]*\s*nail", r"\bhair skin nails\b"],
-    "Skin Health": [r"\bskin\b"],
+    "Skin Health": [r"\bskin\b", r"\bacne\b", r"\bdermatolog", r"\beczema\b"],
     "Joint Health": [r"\bjoint health\b", r"\bjoint\b"],
-    "Joint Support": [r"\bjoint support\b"],
+    "Joint Support": [r"\bjoint support\b", r"\bcartilage\b"],
     "Joint Pain": [r"\bjoint pain\b", r"\barthriti[cs]\b"],
     "Bone Health": [r"\bbone\b", r"\bosteoporosis\b", r"\bcalcium\b"],
     "Heart Health": [r"\bheart\b", r"\bcardio(vascular)?\b"],
@@ -215,16 +247,16 @@ APP_SYNONYMS = {
     "Women's Health": [r"\bwomen['’]s health\b", r"\bfemale health\b"],
     "Energy": [r"\benergy\b", r"\benerg(y|ize|izing)\b"],
     "Endurance": [r"\bendurance\b", r"\bstamina\b"],
-    "Strength": [r"\bstrength\b"],
+    "Strength": [r"\bstrength\b", r"\bstronger\b"],
     "Sports Performance": [r"\bsports? performance\b", r"\bathletic performance\b"],
-    "Sleep Support": [r"\bsleep support\b", r"\brestful sleep\b"],
+    "Sleep Support": [r"\bsleep support\b", r"\brestful sleep\b", r"\bdeep sleep\b"],
     "Sleep Disturbance": [r"\bsleep disturbance\b"],
     "Insomnia": [r"\binsomnia\b"],
-    "Stress": [r"\bstress\b"],
+    "Stress": [r"\bstress\b", r"\badaptogen\b"],
     "Anxiety": [r"\banxiety\b", r"\bcalm\b", r"\banti[-\s]?anxiety\b"],
     "Mood": [r"\bmood\b", r"\bserotonin\b"],
     "Weight Loss": [r"\bweight loss\b", r"\bfat loss\b"],
-    "Weight Management": [r"\bweight management\b", r"\bmanage weight\b"],
+    "Weight Management": [r"\bweight management\b", r"\bmanage weight\b", r"\bappetite control\b"],
     "Metabolism": [r"\bmetabolism\b", r"\bmetabolic\b"],
     "Diabetes": [r"\bdiabet", r"\btype\s*(1|2)\b"],
     "Blood Sugar Imbalance": [r"\bblood sugar\b", r"\bglucose\b"],
@@ -233,28 +265,28 @@ APP_SYNONYMS = {
     "Iron Deficiency": [r"\biron deficiency\b", r"\banemi[ae]\b"],
     "Hydration": [r"\bhydration\b", r"\belectrolyte(s)?\b"],
     "Inflammation": [r"\binflammat(ion|ory)\b", r"\banti[-\s]?inflammatory\b"],
-    "Thyroid Health": [r"\bthyroid\b"],
+    "Thyroid Health": [r"\bthyroid\b", r"\bhashimoto\b"],
     "Prostate Health": [r"\bprostate\b"],
     "Respiratory Health": [r"\brespiratory\b", r"\blung(s)?\b", r"\bbreath(ing)?\b"],
     "Sinusitis": [r"\bsinus(itis)?\b"],
     "Seasonal Allergies": [r"\bseasonal allergies\b", r"\bhay fever\b"],
     "Allergies": [r"\ballerg(y|ies)\b"],
     "Urinary Tract Infection": [r"\buti\b", r"\burinary tract infection\b"],
-    "Urinary Health": [r"\burinary health\b", r"\burinary\b"],
+    "Urinary Health": [r"\burinary\b"],
     "Bladder Support": [r"\bbladder support\b"],
     "Bladder Infection": [r"\bbladder infection\b"],
     "Kidney Health": [r"\bkidney\b", r"\brenal\b"],
     "Liver Health": [r"\bliver\b", r"\bhepatic\b"],
     "Intestinal Health": [r"\bintestinal\b"],
     "Irritable Bowel Syndrome (IBS)": [r"\bibs\b", r"\birritable bowel\b"],
-    "Constipation": [r"\bconstipation\b"],
+    "Constipation": [r"\bconstipat",],
     "Diarrhea": [r"\bdiarrh(oe)?a\b"],
     "Nausea": [r"\bnausea\b", r"\bnauseous\b"],
-    "Nervous System Health": [r"\bnervous system\b"],
+    "Nervous System Health": [r"\bnervous system\b", r"\bneurolog(y|ical)\b"],
     "Nerve Pain": [r"\bnerve pain\b", r"\bneuropath(y|ic)\b"],
     "Gout": [r"\bgout\b"],
     "Uric Acid Levels": [r"\buric acid\b"],
-    "eye health": [r"\beye health\b", r"\bvision\b"],
+    "eye health": [r"\beye health\b", r"\bvision\b", r"\blutein\b", r"\bzeaxanthin\b"],
     "Nail Health": [r"\bnail health\b"],
     "Dental Health": [r"\bdental\b", r"\boral health\b"],
     "Menopause": [r"\bmenopause\b"],
@@ -282,34 +314,46 @@ APP_SYNONYMS = {
     "Circulatory System Health": [r"\bcirculatory\b", r"\bcirculation\b"],
     "Pain Relief": [r"\bpain relief\b", r"\bpain\b"],
 }
+
 def _boosted_texts(row: pd.Series, ordered_cols):
-    return [(str(row.get(c,"")), (_column_priority_score(c) or 1)) for c in ordered_cols]
-def infer_health_apps_multi(row: pd.Series, ordered_cols, top_k: int = 5) -> str:
+    return [(str(row.get(c,"")), _column_priority_score(c)) for c in ordered_cols]
+
+def infer_health_apps_multi(row: pd.Series, ordered_cols, top_lo=3, top_hi=5) -> str:
     scores = {k:0 for k in HEALTH_APPS}
     texts = _boosted_texts(row, ordered_cols)
+
+    # exact canonical phrase matches first
     canon_regex = {k: re.compile(r"\b" + re.sub(r"\s+","\\s+", re.escape(k)).replace(r"\'", r"[’']") + r"\b", re.I) for k in HEALTH_APPS}
     for txt, w in texts:
         if not txt: continue
         for k, rx in canon_regex.items():
             if rx.search(txt): scores[k] += w
+
+    # synonyms / signals
+    for txt, w in texts:
+        if not txt: continue
         for k, syns in APP_SYNONYMS.items():
             if any(re.search(p, txt, flags=re.I) for p in syns):
                 scores[k] += w
-    picks = [(k,v) for k,v in scores.items() if v>0]
-    if not picks: return ""
+
+    picks = [(k,v) for k,v in scores.items() if v >= 2]  # confidence threshold
+    if not picks: 
+        return ""  # if nothing reliable, leave blank
     picks.sort(key=lambda x: (-x[1], x[0]))
-    return "|".join([k for k,_ in picks[:top_k]])
+    # choose between 3 and 5 depending on available strong signals
+    topk = top_hi if len(picks) >= top_hi else max(top_lo, len(picks))
+    return "|".join([k for k,_ in picks[:topk]])
 
 # ── Targeted Audience* ───────────────────────────────────────────────
 _AUD_MAP = {
     "Infant": [r"\binfant(s)?\b", r"\bnewborn(s)?\b", r"\bbab(y|ies)\b"],
     "Kids": [r"\bkid(s)?\b", r"\bchild(ren)?\b", r"\btoddler(s)?\b", r"\bchildren['’]s\b"],
     "Teen": [r"\bteen(s|agers?)?\b", r"\badolescent(s)?\b", r"\byouth\b"],
-    "Adult": [r"\badult(s)?\b", r"\bmen\b", r"\bwomen\b"],  # default if none explicit
+    "Adult": [r"\badult(s)?\b", r"\bmen\b", r"\bwomen\b"],
 }
 def infer_audience(row: pd.Series, ordered_cols) -> str:
     texts = " ".join(str(row.get(c,"")) for c in ordered_cols)
-    for label in ["Infant","Kids","Teen"]:  # strong specific before default
+    for label in ["Infant","Kids","Teen"]:
         if any(re.search(p, texts, flags=re.I) for p in _AUD_MAP[label]):
             return label
     return "Adult"
@@ -332,6 +376,7 @@ def _find_sheet_part_path(z: zipfile.ZipFile, sheet_name: str) -> str:
     if target.startswith("../"): target=target[3:]
     if not target.startswith("xl/"): target="xl/"+target
     return target
+
 def _get_table_paths_for_sheet(z: zipfile.ZipFile, sheet_path: str) -> list:
     rels_path = sheet_path.replace("worksheets/","worksheets/_rels/").replace(".xml",".xml.rels")
     if rels_path not in z.namelist(): return []
@@ -343,6 +388,7 @@ def _get_table_paths_for_sheet(z: zipfile.ZipFile, sheet_path: str) -> list:
             if not target.startswith("xl/"): target="xl/"+target
             out.append(target)
     return out
+
 def _read_table_cols_count(table_xml_bytes: bytes) -> int:
     try:
         root = ET.fromstring(table_xml_bytes)
@@ -354,6 +400,7 @@ def _read_table_cols_count(table_xml_bytes: bytes) -> int:
         return max(cnt, child_count)
     except Exception:
         return 0
+
 def _union_dimension(orig_dim_ref: str, used_cols: int, last_row: int) -> str:
     try:
         _, right = orig_dim_ref.split(":", 1)
@@ -366,8 +413,10 @@ def _union_dimension(orig_dim_ref: str, used_cols: int, last_row: int) -> str:
         orig_last_col,orig_last_row=used_cols,last_row
     u_last_col=max(orig_last_col,used_cols); u_last_row=max(orig_last_row,last_row)
     return f"A1:{_col_letter(u_last_col)}{u_last_row}"
+
 def _ensure_ws_x14ac(root):
     root.set("{http://schemas.openxmlformats.org/markup-compatibility/2006}Ignorable","x14ac")
+
 def _intersects_range(a1: str, r1: int, r2: int) -> bool:
     m = re.match(r"^[A-Z]+(\d+):[A-Z]+(\d+)$", a1 or "", re.I)
     if not m: return False
@@ -438,6 +487,7 @@ def _patch_sheet_xml(sheet_xml_bytes: bytes, header_row: int, start_row: int, us
         sheetPr.attrib.pop("filterMode", None)
 
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
 def _patch_table_xml(table_xml_bytes: bytes, header_row: int, last_row: int, last_col_n: int) -> bytes:
     root = ET.fromstring(table_xml_bytes)
     new_ref = f"A{header_row}:{_col_letter(last_col_n)}{last_row}"
@@ -448,6 +498,7 @@ def _patch_table_xml(table_xml_bytes: bytes, header_row: int, last_row: int, las
     if tcols is not None:
         tcols.set("count", str(sum(1 for _ in tcols)))
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
 def _strip_calcchain_override(ct_bytes: bytes) -> bytes:
     try:
         ns="http://schemas.openxmlformats.org/package/2006/content-types"
@@ -458,6 +509,7 @@ def _strip_calcchain_override(ct_bytes: bytes) -> bytes:
         return ET.tostring(root, encoding="utf-8", xml_declaration=True)
     except Exception:
         return ct_bytes
+
 def fast_patch_template(master_bytes: bytes, sheet_name: str, header_row: int, start_row: int, used_cols: int, block_2d: list) -> bytes:
     zin = zipfile.ZipFile(io.BytesIO(master_bytes), "r")
     sheet_path = _find_sheet_part_path(zin, sheet_name)
@@ -577,7 +629,7 @@ if go:
         if not isinstance(mapping_raw, dict):
             st.error('❌ Mapping JSON must be an object: {"Master header": [aliases...]}'); st.markdown("</div>", unsafe_allow_html=True); st.stop()
 
-        # Inject aliases so computed columns always map even if JSON omitted them
+        # Ensure computed outputs can map even if JSON omitted them
         COMPUTED_ALIASES = {
             "Gender": ["Gender","gender"],
             "health and beauty subtype*": ["health and beauty subtype*","Health & Beauty Subtype","Health and Beauty Subtype"],
@@ -585,18 +637,15 @@ if go:
             "Targeted Audience*": ["Targeted Audience*","Target Audience","targeted audience*"],
             "Legally Required Information*": ["Legally Required Information*","Legally Required Information"],
         }
-
         mapping_aliases = {}
         for k, v in mapping_raw.items():
             aliases = v[:] if isinstance(v, list) else [v]
             if k not in aliases: aliases.append(k)
             mapping_aliases[norm(k)] = aliases
-        # add computed defaults if not present
         for k, aliases in COMPUTED_ALIASES.items():
             nk = norm(k)
             if nk not in mapping_aliases:
                 mapping_aliases[nk] = aliases + [k]
-
         slog(f"✅ Loaded {len(mapping_aliases)} header mappings (with computed aliases)", 0.2)
 
         # Step 2: template headers
@@ -658,8 +707,8 @@ if go:
             # Health & Beauty Subtype* (multi, up to 3, '|' delimited)
             on_df["health and beauty subtype*"] = on_df.apply(lambda r: infer_hb_subtypes_multi(r, ordered, top_k=3), axis=1)
 
-            # Health Application* (multi, up to 5, '|' delimited)
-            on_df["Health Application*"] = on_df.apply(lambda r: infer_health_apps_multi(r, ordered, top_k=5), axis=1)
+            # Health Application* (multi, 3-5, '|' delimited)
+            on_df["Health Application*"] = on_df.apply(lambda r: infer_health_apps_multi(r, ordered, top_lo=3, top_hi=5), axis=1)
 
             # Targeted Audience* (default Adult)
             on_df["Targeted Audience*"] = on_df.apply(lambda r: infer_audience(r, ordered), axis=1)
@@ -712,7 +761,7 @@ if go:
                     block[i][col-1] = v
         slog(f"✅ Built data block: {n_rows} rows × {used_cols} columns", 0.8)
 
-        # Step 6: write file (fixed start_row var)
+        # Step 6: write file
         slog("⏳ **Step 6/6:** Writing final masterfile via fast XML...", 0.85)
         out_bytes = fast_patch_template(
             master_bytes=master_bytes,
