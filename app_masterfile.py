@@ -83,11 +83,11 @@ def safe_filename(name: str, fallback: str = "final_masterfile"):
     name = re.sub(r"[^A-Za-z0-9._ -]+", "", name.strip())
     return name or fallback
 
-# ── Gender inference (title-first override; broader coverage) ────────
+# ── Gender inference (already added) ─────────────────────────────────
 _APOS = r"[’']"
-_GENDER_W = re.compile(rf"\b(women(?:{_APOS}s)?|womens|woman|female|lad(?:y|ies)|for\s+her)\b", re.I)
-_GENDER_M = re.compile(rf"\b(men(?:{_APOS}s)?|mens|man|male|gent(?:lemen)?|for\s+him)\b", re.I)
-_UNISEX   = re.compile(r"\b(unisex|his\s*&\s*her(s)?|his\s+and\s+her(s)?|all\s+genders|everyone|for\s+all|men\s*&\s*women|women\s*&\s*men)\b", re.I)
+_GENDER_W = re.compile(rf"\b(women(?:{_APOS}s)?|woman|female|lad(?:y|ies))\b", re.I)
+_GENDER_M = re.compile(rf"\b(men(?:{_APOS}s)?|man|male|gent(?:lemen)?)\b", re.I)
+_UNISEX   = re.compile(r"\b(unisex|all genders|everyone|for all|men\s*&\s*women|women\s*&\s*men)\b", re.I)
 
 def _has_w(text: str) -> bool: return bool(_GENDER_W.search((text or "")))
 def _has_m(text: str) -> bool: return bool(_GENDER_M.search((text or "")))
@@ -104,259 +104,130 @@ SEO_ALIASES = {
     "bullet_point5": ["Bullet point 5","bullet_point5", "Bullet Feature 5", "bullet point 5", "bullet_point5 - en-US", "Key Features #5 - en-US"],
 }
 
-def select_seo_columns(df: pd.DataFrame):
+def select_seo_columns(df: pd.DataFrame) -> list[str]:
     header_lookup = {norm(c): c for c in df.columns}
     picks = []
     for _, aliases in SEO_ALIASES.items():
         for alias in aliases:
             key = norm(alias)
             if key in header_lookup:
-                picks.append(header_lookup[key]); break
+                picks.append(header_lookup[key])
+                break
     seen = set()
     picks = [c for c in picks if not (c in seen or seen.add(c))]
-    if picks: return picks
+    if picks:
+        return picks
     heur = [c for c in df.columns if any(k in norm(c) for k in ["title","product name","description","bullet","feature","name"])]
     return heur if heur else list(df.columns)
 
 def _column_priority_score(col_name: str) -> int:
     n = norm(col_name)
-    if "title" in n or "product name" in n: return 6
-    if "bullet" in n or "feature" in n:     return 4
-    if "description" in n:                   return 2
-    return 1
+    if "title" in n or "product name" in n: return 3
+    if "bullet" in n or "feature" in n:     return 2
+    if "description" in n:                   return 1
+    return 0
 
-def order_seo_columns(cols): 
+def order_seo_columns(cols: list[str]) -> list[str]:
     return sorted(cols, key=_column_priority_score, reverse=True)
 
-# ── Gender (final) ───────────────────────────────────────────────────
-def infer_gender_from_columns(row: pd.Series, ordered_cols) -> str:
-    # Title override
-    titles = [c for c in ordered_cols if _column_priority_score(c) == 6] or ordered_cols[:1]
-    title_text = " ".join(str(row.get(c, "")) for c in titles)
-    pw, pm = _has_w(title_text), _has_m(title_text)
-    if pw and not pm: return "Women"
-    if pm and not pw: return "Men"
-    if pw and pm:     return "Gender Neutral"
-
-    # Global check
-    all_text = " ".join(str(row.get(c,"")) for c in ordered_cols)
-    if _is_unisex(all_text): return "Gender Neutral"
-
-    any_w = any(_has_w(str(row.get(c,""))) for c in ordered_cols)
-    any_m = any(_has_m(str(row.get(c,""))) for c in ordered_cols)
+def infer_gender_from_columns(row: pd.Series, ordered_cols: list[str]) -> str:
+    for c in ordered_cols:
+        t = str(row.get(c, ""))
+        if _is_unisex(t):
+            return "Gender Neutral"
+    any_w = False; any_m = False
+    for c in ordered_cols:
+        t = str(row.get(c, ""))
+        w = _has_w(t); m = _has_m(t)
+        any_w = any_w or w
+        any_m = any_m or m
+        if w and not m:
+            return "Women"
+        if m and not w:
+            return "Men"
     if any_w and any_m: return "Gender Neutral"
     if any_w: return "Women"
     if any_m: return "Men"
     return "Gender Neutral"
 
-# ── Subtype candidates & patterns (multi, max 3) ─────────────────────
-SUBTYPE_VALUES = [
-    "Collagen","Protein Powder","Multivitamins",
-    "Vitamin A","Vitamin B","Vitamin C","Vitamin D","Vitamin E","Vitamin K"
-]
+# ── NEW: Health & Beauty Subtype inference ───────────────────────────
+# Valid values (multi; max 3 joined by "|"):
+# Collagen, Protein Powder, Multivitamins, Vitamin A, Vitamin B, Vitamin C, Vitamin D, Vitamin E, Vitamin K
 
+# Exclude bars/shakes unless explicitly "protein powder"
 _EXCLUDE_NON_POWDER = re.compile(r"\b(protein\s+bar|protein\s+cookie|protein\s+shake|ready[-\s]?to[-\s]?drink|rtd)\b", re.I)
 
-SUBTYPE_PATTERNS = {
+# Pattern banks for each subtype (broad but precise)
+_HB_SUBTYPE_PATTERNS = {
     "Collagen": [
         r"\bcollagen\b", r"\bcollagen\s+peptid(e|es)\b", r"\bhydrol(y|i)zed\s+collagen\b",
         r"\bmarine\s+collagen\b", r"\btype\s*(i|ii|iii)\b"
     ],
     "Protein Powder": [
         r"\bprotein\s+powder\b", r"\bwhey\b", r"\bcasein\b", r"\bmicellar\s+casein\b",
-        r"\b(isolate|concentrate)\b", r"\bpea\s+protein\b", r"\bsoy\s+protein\b", r"\brice\s+protein\b", r"\bprotein\s+blend\b"
+        r"\b(isolate|concentrate)\b", r"\bpea\s+protein\b", r"\bsoy\s+protein\b",
+        r"\brice\s+protein\b", r"\bprotein\s+blend\b"
     ],
     "Multivitamins": [
         r"\bmult(i|i-)?vitamin(s)?\b", r"\bdaily\s+multivitamin(s)?\b", r"\bmulti[-\s]?vit\b"
     ],
-    "Vitamin A": [r"\bvit(amin)?\s*a\b", r"\bretinol\b", r"\bretinyl\b"],
+    "Vitamin A": [
+        r"\bvit(amin)?\s*a\b", r"\bretinol\b", r"\bretinyl\b"
+    ],
     "Vitamin B": [
         r"\bvit(amin)?\s*b(\d{1,2})?\b", r"\bb[-\s]?complex\b", r"\bthiamin(e)?\b", r"\briboflavin\b",
         r"\bniacin(amide)?\b", r"\bpantothenic\b", r"\bpyridoxin(e)?\b", r"\bbiotin\b",
         r"\bfolate\b", r"\bfolic\s+acid\b", r"\bcobalamin\b", r"\bB-?12\b", r"\bB-?6\b", r"\bB-?3\b"
     ],
-    "Vitamin C": [r"\bvit(amin)?\s*c\b", r"\bascorb(ic|ate)\b", r"\bester[-\s]?c\b"],
-    "Vitamin D": [r"\bvit(amin)?\s*d\b", r"\bd-?3\b", r"\bd-?2\b", r"\bcholecalciferol\b", r"\bergocalciferol\b"],
-    "Vitamin E": [r"\bvit(amin)?\s*e\b", r"\btocopherol\b", r"\btocotrienol\b"],
-    "Vitamin K": [r"\bvit(amin)?\s*k\b", r"\bk-?2\b", r"\bmk-?\s?7\b", r"\bmenaquinone\b", r"\bphylloquinone\b"],
+    "Vitamin C": [
+        r"\bvit(amin)?\s*c\b", r"\bascorb(ic|ate)\b", r"\bester[-\s]?c\b"
+    ],
+    "Vitamin D": [
+        r"\bvit(amin)?\s*d\b", r"\bd-?3\b", r"\bd-?2\b", r"\bcholecalciferol\b", r"\bergocalciferol\b"
+    ],
+    "Vitamin E": [
+        r"\bvit(amin)?\s*e\b", r"\btocopherol\b", r"\btocotrienol\b"
+    ],
+    "Vitamin K": [
+        r"\bvit(amin)?\s*k\b", r"\bk-?2\b", r"\bmk-?\s?7\b", r"\bmenaquinone\b", r"\bphylloquinone\b"
+    ],
 }
 
-def _score_patterns(text: str, patterns: list[str]) -> int:
+def _hb_score_patterns(text: str, patterns: list[str]) -> int:
     if not text: return 0
-    score = 0
-    for p in patterns:
-        if re.search(p, text, re.I):
-            score += 1
-    return score
+    return sum(1 for p in patterns if re.search(p, text, re.I))
 
-def infer_hb_subtypes_multi(row: pd.Series, ordered_cols, top_k: int = 3) -> str:
-    scores = {}
+def infer_hb_subtype_from_columns(row: pd.Series, ordered_cols: list[str]) -> str:
+    """
+    Returns up to 3 subtypes joined by '|', or '' if nothing confidently detected.
+    Weighted by column importance: Title (3) > Bullet (2) > Description (1).
+    Bars/shakes excluded from Protein Powder unless explicit 'protein powder' appears.
+    """
+    scores = {k: 0 for k in _HB_SUBTYPE_PATTERNS.keys()}
+
     for c in ordered_cols:
-        t = str(row.get(c, "")) or ""
-        if not t: 
+        txt = str(row.get(c, "")) or ""
+        if not txt:
             continue
-        if _EXCLUDE_NON_POWDER.search(t):
-            # don't award Protein Powder points in bar/shake contexts unless explicit "powder"
-            pow_override = bool(re.search(r"\bprotein\s+powder\b", t, re.I))
-        else:
-            pow_override = True
+        weight = _column_priority_score(c)
 
-        w = _column_priority_score(c)
-        for label, pats in SUBTYPE_PATTERNS.items():
-            if label == "Protein Powder" and not pow_override:
+        # Protein Powder exclusion logic
+        protein_powder_ok = True
+        if _EXCLUDE_NON_POWDER.search(txt) and not re.search(r"\bprotein\s+powder\b", txt, re.I):
+            protein_powder_ok = False
+
+        for label, pats in _HB_SUBTYPE_PATTERNS.items():
+            if label == "Protein Powder" and not protein_powder_ok:
                 continue
-            scores[label] = scores.get(label, 0) + w * _score_patterns(t, pats)
+            hits = _hb_score_patterns(txt, pats)
+            if hits:
+                scores[label] += weight * hits
 
-    # keep confident ones (>=2 total weighted hits), cap to top_k
-    picks = [(k,v) for k,v in scores.items() if v >= 2]
-    if not picks: 
+    picks = [(k, v) for k, v in scores.items() if v > 0]
+    if not picks:
         return ""
-    picks.sort(key=lambda x: (-x[1], x[0]))
-    return "|".join([k for k,_ in picks[:top_k]])
-
-# ── Health Applications (multi, max 5) ───────────────────────────────
-HEALTH_APPS = [
-"Adrenal Health","Aging","Allergies","Anxiety","Bladder Infection","Bladder Support","Bloating",
-"Blood Clots","Blood Sugar Imbalance","Bone Health","Children's Health","Cholesterol Level Maintenance",
-"Circulatory System Health","Constipation","Dental Health","Diabetes","Diarrhea","Digestive Health",
-"Endurance","Energy","eye health","Fertility","Fever","Gout","Hair, Skin and Nail Health","Heart Health",
-"High Cholesterol","Homocysteine Levels","Hydration","Immune System Health","Infection","Inflammation",
-"Insomnia","Intestinal Health","Iron Deficiency","Irritable Bowel Syndrome (IBS)","Joint Health",
-"Joint Pain","Joint Support","Kidney Health","Lactation","Liver Health","Lymphatic Health",
-"Memory and Brain Health","Men's Health","Menopause","Metabolism","Mood","Morning Sickness","Muscle Growth",
-"Muscle Pain","Muscle Tension","Nail Health","Nausea","Nerve Pain","Nervous System Health","overall health",
-"Pain Relief","PMS","Postnatal Health","Postpartum Care","Pregnancy","Premenstrual Breast Discomfort",
-"Prenatal Health","Pressure Ulcers","Prostate Health","Respiratory Health","Seasonal Allergies","Sexual Health",
-"Sinusitis","Skin Health","Sleep Disturbance","Sleep Support","Sports Performance","Strength","Stress",
-"Testosterone Level","Thyroid Health","Tinnitus","Uric Acid Levels","Urinary Health","Urinary Tract Infection",
-"Vaginal Health","Vertigo","Water Retention","Weight Loss","Weight Management","Women's Health","Yeast Infection"
-]
-
-APP_SYNONYMS = {
-    "Immune System Health": [r"\bimmune\b", r"\bimmunity\b", r"\bimmune support\b"],
-    "Digestive Health": [r"\bdigest(ion|ive)\b", r"\bgut health\b"],
-    "Hair, Skin and Nail Health": [r"\bhair[, &and]*\s*skin[, &and]*\s*nail", r"\bhair skin nails\b"],
-    "Skin Health": [r"\bskin\b", r"\bacne\b", r"\bdermatolog", r"\beczema\b"],
-    "Joint Health": [r"\bjoint health\b", r"\bjoint\b"],
-    "Joint Support": [r"\bjoint support\b", r"\bcartilage\b"],
-    "Joint Pain": [r"\bjoint pain\b", r"\barthriti[cs]\b"],
-    "Bone Health": [r"\bbone\b", r"\bosteoporosis\b", r"\bcalcium\b"],
-    "Heart Health": [r"\bheart\b", r"\bcardio(vascular)?\b"],
-    "Memory and Brain Health": [r"\bbrain\b", r"\bmemory\b", r"\bcognitive\b", r"\bfocus\b"],
-    "Men's Health": [r"\bmen['’]s health\b", r"\bmale health\b"],
-    "Women's Health": [r"\bwomen['’]s health\b", r"\bfemale health\b"],
-    "Energy": [r"\benergy\b", r"\benerg(y|ize|izing)\b"],
-    "Endurance": [r"\bendurance\b", r"\bstamina\b"],
-    "Strength": [r"\bstrength\b", r"\bstronger\b"],
-    "Sports Performance": [r"\bsports? performance\b", r"\bathletic performance\b"],
-    "Sleep Support": [r"\bsleep support\b", r"\brestful sleep\b", r"\bdeep sleep\b"],
-    "Sleep Disturbance": [r"\bsleep disturbance\b"],
-    "Insomnia": [r"\binsomnia\b"],
-    "Stress": [r"\bstress\b", r"\badaptogen\b"],
-    "Anxiety": [r"\banxiety\b", r"\bcalm\b", r"\banti[-\s]?anxiety\b"],
-    "Mood": [r"\bmood\b", r"\bserotonin\b"],
-    "Weight Loss": [r"\bweight loss\b", r"\bfat loss\b"],
-    "Weight Management": [r"\bweight management\b", r"\bmanage weight\b", r"\bappetite control\b"],
-    "Metabolism": [r"\bmetabolism\b", r"\bmetabolic\b"],
-    "Diabetes": [r"\bdiabet", r"\btype\s*(1|2)\b"],
-    "Blood Sugar Imbalance": [r"\bblood sugar\b", r"\bglucose\b"],
-    "Cholesterol Level Maintenance": [r"\bcholesterol\b", r"\bhdl\b", r"\bldl\b"],
-    "High Cholesterol": [r"\bhigh cholesterol\b", r"\bhypercholesterolemia\b"],
-    "Iron Deficiency": [r"\biron deficiency\b", r"\banemi[ae]\b"],
-    "Hydration": [r"\bhydration\b", r"\belectrolyte(s)?\b"],
-    "Inflammation": [r"\binflammat(ion|ory)\b", r"\banti[-\s]?inflammatory\b"],
-    "Thyroid Health": [r"\bthyroid\b", r"\bhashimoto\b"],
-    "Prostate Health": [r"\bprostate\b"],
-    "Respiratory Health": [r"\brespiratory\b", r"\blung(s)?\b", r"\bbreath(ing)?\b"],
-    "Sinusitis": [r"\bsinus(itis)?\b"],
-    "Seasonal Allergies": [r"\bseasonal allergies\b", r"\bhay fever\b"],
-    "Allergies": [r"\ballerg(y|ies)\b"],
-    "Urinary Tract Infection": [r"\buti\b", r"\burinary tract infection\b"],
-    "Urinary Health": [r"\burinary\b"],
-    "Bladder Support": [r"\bbladder support\b"],
-    "Bladder Infection": [r"\bbladder infection\b"],
-    "Kidney Health": [r"\bkidney\b", r"\brenal\b"],
-    "Liver Health": [r"\bliver\b", r"\bhepatic\b"],
-    "Intestinal Health": [r"\bintestinal\b"],
-    "Irritable Bowel Syndrome (IBS)": [r"\bibs\b", r"\birritable bowel\b"],
-    "Constipation": [r"\bconstipat",],
-    "Diarrhea": [r"\bdiarrh(oe)?a\b"],
-    "Nausea": [r"\bnausea\b", r"\bnauseous\b"],
-    "Nervous System Health": [r"\bnervous system\b", r"\bneurolog(y|ical)\b"],
-    "Nerve Pain": [r"\bnerve pain\b", r"\bneuropath(y|ic)\b"],
-    "Gout": [r"\bgout\b"],
-    "Uric Acid Levels": [r"\buric acid\b"],
-    "eye health": [r"\beye health\b", r"\bvision\b", r"\blutein\b", r"\bzeaxanthin\b"],
-    "Nail Health": [r"\bnail health\b"],
-    "Dental Health": [r"\bdental\b", r"\boral health\b"],
-    "Menopause": [r"\bmenopause\b"],
-    "PMS": [r"\bpms\b", r"\bpremenstrual\b"],
-    "Pregnancy": [r"\bpregnan(t|cy)\b"],
-    "Prenatal Health": [r"\bprenatal\b"],
-    "Postnatal Health": [r"\bpostnatal\b"],
-    "Postpartum Care": [r"\bpostpartum\b"],
-    "Morning Sickness": [r"\bmorning sickness\b"],
-    "Fertility": [r"\bfertility\b", r"\bfertile\b"],
-    "Lactation": [r"\blactation\b", r"\bbreastfeeding\b"],
-    "Testosterone Level": [r"\btestosterone\b"],
-    "Sexual Health": [r"\bsexual health\b", r"\blibido\b"],
-    "Children's Health": [r"\bchild(ren)?\b", r"\bkids?\b", r"\btoddler\b"],
-    "Aging": [r"\baging\b", r"\banti[-\s]?aging\b"],
-    "Strength": [r"\bstrength\b"],
-    "overall health": [r"\boverall health\b", r"\bgeneral wellness\b", r"\bdaily health\b"],
-    "Infection": [r"\binfection\b"],
-    "Fever": [r"\bfever\b"],
-    "Tinnitus": [r"\btinnitus\b"],
-    "Vertigo": [r"\bvertigo\b"],
-    "Water Retention": [r"\bwater retention\b", r"\bfluid retention\b"],
-    "Pressure Ulcers": [r"\bpressure ulcers?\b", r"\bbed sores?\b"],
-    "Homocysteine Levels": [r"\bhomocystein(e)?\b"],
-    "Circulatory System Health": [r"\bcirculatory\b", r"\bcirculation\b"],
-    "Pain Relief": [r"\bpain relief\b", r"\bpain\b"],
-}
-
-def _boosted_texts(row: pd.Series, ordered_cols):
-    return [(str(row.get(c,"")), _column_priority_score(c)) for c in ordered_cols]
-
-def infer_health_apps_multi(row: pd.Series, ordered_cols, top_lo=3, top_hi=5) -> str:
-    scores = {k:0 for k in HEALTH_APPS}
-    texts = _boosted_texts(row, ordered_cols)
-
-    # exact canonical phrase matches first
-    canon_regex = {k: re.compile(r"\b" + re.sub(r"\s+","\\s+", re.escape(k)).replace(r"\'", r"[’']") + r"\b", re.I) for k in HEALTH_APPS}
-    for txt, w in texts:
-        if not txt: continue
-        for k, rx in canon_regex.items():
-            if rx.search(txt): scores[k] += w
-
-    # synonyms / signals
-    for txt, w in texts:
-        if not txt: continue
-        for k, syns in APP_SYNONYMS.items():
-            if any(re.search(p, txt, flags=re.I) for p in syns):
-                scores[k] += w
-
-    picks = [(k,v) for k,v in scores.items() if v >= 2]  # confidence threshold
-    if not picks: 
-        return ""  # if nothing reliable, leave blank
-    picks.sort(key=lambda x: (-x[1], x[0]))
-    # choose between 3 and 5 depending on available strong signals
-    topk = top_hi if len(picks) >= top_hi else max(top_lo, len(picks))
-    return "|".join([k for k,_ in picks[:topk]])
-
-# ── Targeted Audience* ───────────────────────────────────────────────
-_AUD_MAP = {
-    "Infant": [r"\binfant(s)?\b", r"\bnewborn(s)?\b", r"\bbab(y|ies)\b"],
-    "Kids": [r"\bkid(s)?\b", r"\bchild(ren)?\b", r"\btoddler(s)?\b", r"\bchildren['’]s\b"],
-    "Teen": [r"\bteen(s|agers?)?\b", r"\badolescent(s)?\b", r"\byouth\b"],
-    "Adult": [r"\badult(s)?\b", r"\bmen\b", r"\bwomen\b"],
-}
-def infer_audience(row: pd.Series, ordered_cols) -> str:
-    texts = " ".join(str(row.get(c,"")) for c in ordered_cols)
-    for label in ["Infant","Kids","Teen"]:
-        if any(re.search(p, texts, flags=re.I) for p in _AUD_MAP[label]):
-            return label
-    return "Adult"
+    picks.sort(key=lambda kv: (-kv[1], kv[0]))
+    return "|".join([k for k, _ in picks[:3]])
 
 # ── ZIP / XML helpers ────────────────────────────────────────────────
 def _find_sheet_part_path(z: zipfile.ZipFile, sheet_name: str) -> str:
@@ -628,25 +499,12 @@ if go:
             st.error(f"❌ Invalid JSON format: {e}"); st.markdown("</div>", unsafe_allow_html=True); st.stop()
         if not isinstance(mapping_raw, dict):
             st.error('❌ Mapping JSON must be an object: {"Master header": [aliases...]}'); st.markdown("</div>", unsafe_allow_html=True); st.stop()
-
-        # Ensure computed outputs can map even if JSON omitted them
-        COMPUTED_ALIASES = {
-            "Gender": ["Gender","gender"],
-            "health and beauty subtype*": ["health and beauty subtype*","Health & Beauty Subtype","Health and Beauty Subtype"],
-            "Health Application*": ["Health Application*","Health Applications","health application*","health application"],
-            "Targeted Audience*": ["Targeted Audience*","Target Audience","targeted audience*"],
-            "Legally Required Information*": ["Legally Required Information*","Legally Required Information"],
-        }
         mapping_aliases = {}
         for k, v in mapping_raw.items():
             aliases = v[:] if isinstance(v, list) else [v]
             if k not in aliases: aliases.append(k)
             mapping_aliases[norm(k)] = aliases
-        for k, aliases in COMPUTED_ALIASES.items():
-            nk = norm(k)
-            if nk not in mapping_aliases:
-                mapping_aliases[nk] = aliases + [k]
-        slog(f"✅ Loaded {len(mapping_aliases)} header mappings (with computed aliases)", 0.2)
+        slog(f"✅ Loaded {len(mapping_aliases)} header mappings", 0.2)
 
         # Step 2: template headers
         slog("⏳ **Step 2/6:** Reading template headers...", 0.3)
@@ -696,32 +554,16 @@ if go:
         else:
             st.warning("No category column detected — no filtering applied.")
 
-        # Step 3.7: infer attributes from SEO columns
+        # Step 3.7: infer Gender and Health & Beauty Subtype from SEO columns
         try:
             seo_cols = select_seo_columns(on_df)
             ordered = order_seo_columns(seo_cols)
-
-            # Gender
             on_df["Gender"] = on_df.apply(lambda r: infer_gender_from_columns(r, ordered), axis=1)
-
-            # Health & Beauty Subtype* (multi, up to 3, '|' delimited)
-            on_df["health and beauty subtype*"] = on_df.apply(lambda r: infer_hb_subtypes_multi(r, ordered, top_k=3), axis=1)
-
-            # Health Application* (multi, 3-5, '|' delimited)
-            on_df["Health Application*"] = on_df.apply(lambda r: infer_health_apps_multi(r, ordered, top_lo=3, top_hi=5), axis=1)
-
-            # Targeted Audience* (default Adult)
-            on_df["Targeted Audience*"] = on_df.apply(lambda r: infer_audience(r, ordered), axis=1)
-
-            # Legally Required Information* (constant)
-            on_df["Legally Required Information*"] = "Healthcare Disclaimer"
-
+            # NEW column exactly as requested (will map if template header matches; norm() handles case)
+            on_df["health and beauty subtype*"] = on_df.apply(lambda r: infer_hb_subtype_from_columns(r, ordered), axis=1)
         except Exception:
             on_df["Gender"] = "Gender Neutral"
             on_df["health and beauty subtype*"] = ""
-            on_df["Health Application*"] = ""
-            on_df["Targeted Audience*"] = "Adult"
-            on_df["Legally Required Information*"] = "Healthcare Disclaimer"
 
         # refresh headers so mapping sees the new columns
         on_headers = list(on_df.columns)
@@ -763,14 +605,9 @@ if go:
 
         # Step 6: write file
         slog("⏳ **Step 6/6:** Writing final masterfile via fast XML...", 0.85)
-        out_bytes = fast_patch_template(
-            master_bytes=master_bytes,
-            sheet_name=MASTER_TEMPLATE_SHEET,
-            header_row=MASTER_DISPLAY_ROW,
-            start_row=MASTER_DATA_START_ROW,
-            used_cols=used_cols,
-            block_2d=block
-        )
+        out_bytes = fast_patch_template(master_bytes=master_bytes, sheet_name=MASTER_TEMPLATE_SHEET,
+                                        header_row=MASTER_DISPLAY_ROW, start_row=master_SECONDARY_ROW+1 if False else  MASTER_DATA_START_ROW,
+                                        used_cols=used_cols, block_2d=block)
         st.success("🎉 **Complete!**")
         final_base = safe_filename(final_name_input, fallback="target_final_masterfile")
         final_filename = f"{final_base}{ext}"
