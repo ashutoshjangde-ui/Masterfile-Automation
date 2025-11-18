@@ -150,84 +150,144 @@ def infer_gender_from_columns(row: pd.Series, ordered_cols: list[str]) -> str:
     if any_m: return "Men"
     return "Gender Neutral"
 
-# ── NEW: Health & Beauty Subtype inference ───────────────────────────
-# Valid values (multi; max 3 joined by "|"):
-# Collagen, Protein Powder, Multivitamins, Vitamin A, Vitamin B, Vitamin C, Vitamin D, Vitamin E, Vitamin K
-
-# Exclude bars/shakes unless explicitly "protein powder"
+# ── Health & Beauty Subtype (already present) ────────────────────────
 _EXCLUDE_NON_POWDER = re.compile(r"\b(protein\s+bar|protein\s+cookie|protein\s+shake|ready[-\s]?to[-\s]?drink|rtd)\b", re.I)
-
-# Pattern banks for each subtype (broad but precise)
 _HB_SUBTYPE_PATTERNS = {
-    "Collagen": [
-        r"\bcollagen\b", r"\bcollagen\s+peptid(e|es)\b", r"\bhydrol(y|i)zed\s+collagen\b",
-        r"\bmarine\s+collagen\b", r"\btype\s*(i|ii|iii)\b"
-    ],
-    "Protein Powder": [
-        r"\bprotein\s+powder\b", r"\bwhey\b", r"\bcasein\b", r"\bmicellar\s+casein\b",
-        r"\b(isolate|concentrate)\b", r"\bpea\s+protein\b", r"\bsoy\s+protein\b",
-        r"\brice\s+protein\b", r"\bprotein\s+blend\b"
-    ],
-    "Multivitamins": [
-        r"\bmult(i|i-)?vitamin(s)?\b", r"\bdaily\s+multivitamin(s)?\b", r"\bmulti[-\s]?vit\b"
-    ],
-    "Vitamin A": [
-        r"\bvit(amin)?\s*a\b", r"\bretinol\b", r"\bretinyl\b"
-    ],
-    "Vitamin B": [
-        r"\bvit(amin)?\s*b(\d{1,2})?\b", r"\bb[-\s]?complex\b", r"\bthiamin(e)?\b", r"\briboflavin\b",
-        r"\bniacin(amide)?\b", r"\bpantothenic\b", r"\bpyridoxin(e)?\b", r"\bbiotin\b",
-        r"\bfolate\b", r"\bfolic\s+acid\b", r"\bcobalamin\b", r"\bB-?12\b", r"\bB-?6\b", r"\bB-?3\b"
-    ],
-    "Vitamin C": [
-        r"\bvit(amin)?\s*c\b", r"\bascorb(ic|ate)\b", r"\bester[-\s]?c\b"
-    ],
-    "Vitamin D": [
-        r"\bvit(amin)?\s*d\b", r"\bd-?3\b", r"\bd-?2\b", r"\bcholecalciferol\b", r"\bergocalciferol\b"
-    ],
-    "Vitamin E": [
-        r"\bvit(amin)?\s*e\b", r"\btocopherol\b", r"\btocotrienol\b"
-    ],
-    "Vitamin K": [
-        r"\bvit(amin)?\s*k\b", r"\bk-?2\b", r"\bmk-?\s?7\b", r"\bmenaquinone\b", r"\bphylloquinone\b"
-    ],
+    "Collagen": [r"\bcollagen\b", r"\bcollagen\s+peptid(e|es)\b", r"\bhydrol(y|i)zed\s+collagen\b", r"\bmarine\s+collagen\b", r"\btype\s*(i|ii|iii)\b"],
+    "Protein Powder": [r"\bprotein\s+powder\b", r"\bwhey\b", r"\bcasein\b", r"\bmicellar\s+casein\b", r"\b(isolate|concentrate)\b", r"\bpea\s+protein\b", r"\bsoy\s+protein\b", r"\brice\s+protein\b", r"\bprotein\s+blend\b"],
+    "Multivitamins": [r"\bmult(i|i-)?vitamin(s)?\b", r"\bdaily\s+multivitamin(s)?\b", r"\bmulti[-\s]?vit\b"],
+    "Vitamin A": [r"\bvit(amin)?\s*a\b", r"\bretinol\b", r"\bretinyl\b"],
+    "Vitamin B": [r"\bvit(amin)?\s*b(\d{1,2})?\b", r"\bb[-\s]?complex\b", r"\bthiamin(e)?\b", r"\briboflavin\b", r"\bniacin(amide)?\b", r"\bpantothenic\b", r"\bpyridoxin(e)?\b", r"\bbiotin\b", r"\bfolate\b", r"\bfolic\s+acid\b", r"\bcobalamin\b", r"\bB-?12\b", r"\bB-?6\b", r"\bB-?3\b"],
+    "Vitamin C": [r"\bvit(amin)?\s*c\b", r"\bascorb(ic|ate)\b", r"\bester[-\s]?c\b"],
+    "Vitamin D": [r"\bvit(amin)?\s*d\b", r"\bd-?3\b", r"\bd-?2\b", r"\bcholecalciferol\b", r"\bergocalciferol\b"],
+    "Vitamin E": [r"\bvit(amin)?\s*e\b", r"\btocopherol\b", r"\btocotrienol\b"],
+    "Vitamin K": [r"\bvit(amin)?\s*k\b", r"\bk-?2\b", r"\bmk-?\s?7\b", r"\bmenaquinone\b", r"\bphylloquinone\b"],
 }
-
 def _hb_score_patterns(text: str, patterns: list[str]) -> int:
     if not text: return 0
     return sum(1 for p in patterns if re.search(p, text, re.I))
-
 def infer_hb_subtype_from_columns(row: pd.Series, ordered_cols: list[str]) -> str:
-    """
-    Returns up to 3 subtypes joined by '|', or '' if nothing confidently detected.
-    Weighted by column importance: Title (3) > Bullet (2) > Description (1).
-    Bars/shakes excluded from Protein Powder unless explicit 'protein powder' appears.
-    """
     scores = {k: 0 for k in _HB_SUBTYPE_PATTERNS.keys()}
-
     for c in ordered_cols:
         txt = str(row.get(c, "")) or ""
         if not txt:
             continue
         weight = _column_priority_score(c)
-
-        # Protein Powder exclusion logic
         protein_powder_ok = True
         if _EXCLUDE_NON_POWDER.search(txt) and not re.search(r"\bprotein\s+powder\b", txt, re.I):
             protein_powder_ok = False
-
         for label, pats in _HB_SUBTYPE_PATTERNS.items():
             if label == "Protein Powder" and not protein_powder_ok:
                 continue
             hits = _hb_score_patterns(txt, pats)
             if hits:
                 scores[label] += weight * hits
-
     picks = [(k, v) for k, v in scores.items() if v > 0]
     if not picks:
         return ""
     picks.sort(key=lambda kv: (-kv[1], kv[0]))
-    return "|".join([k for k, _ in picks[:3]])
+    return "|".join([k for k, _ in picks[:3]])  # max 3
+
+# ── NEW: Health Application* inference (ONLY CHANGE ADDED) ──────────
+_HEALTH_APP_LABELS = [
+    "Adrenal Health","Aging","Allergies","Anxiety","Bladder Infection","Bladder Support","Bloating","Blood Clots",
+    "Blood Sugar Imbalance","Bone Health","Children's Health","Cholesterol Level Maintenance","Circulatory System Health",
+    "Constipation","Dental Health","Diabetes","Diarrhea","Digestive Health","Endurance","Energy","eye health","Fertility",
+    "Fever","Gout","Hair, Skin and Nail Health","Heart Health","High Cholesterol","Homocysteine Levels","Hydration",
+    "Immune System Health","Infection","Inflammation","Insomnia","Intestinal Health","Iron Deficiency",
+    "Irritable Bowel Syndrome (IBS)","Joint Health","Joint Pain","Joint Support","Kidney Health","Lactation",
+    "Liver Health","Lymphatic Health","Memory and Brain Health","Men's Health","Menopause","Metabolism","Mood",
+    "Morning Sickness","Muscle Growth","Muscle Pain","Muscle Tension","Nail Health","Nausea","Nerve Pain",
+    "Nervous System Health","overall health","Pain Relief","PMS","Postnatal Health","Postpartum Care","Pregnancy",
+    "Premenstrual Breast Discomfort","Prenatal Health","Pressure Ulcers","Prostate Health","Respiratory Health",
+    "Seasonal Allergies","Sexual Health","Sinusitis","Skin Health","Sleep Disturbance","Sleep Support",
+    "Sports Performance","Strength","Stress","Testosterone Level","Thyroid Health","Tinnitus","Uric Acid Levels",
+    "Urinary Health","Urinary Tract Infection","Vaginal Health","Vertigo","Water Retention","Weight Loss",
+    "Weight Management","Women's Health","Yeast Infection"
+]
+
+# Base pattern builder and synonyms to improve recall
+def _make_base_pat(label: str) -> str:
+    s = label.lower()
+    s = s.replace("children's", r"children(?:'s)?")
+    s = s.replace("men's", r"men(?:'s)?")
+    s = s.replace("women's", r"women(?:'s)?")
+    s = re.sub(r"\s*\(.*?\)\s*", "", s)  # drop parenthetical like (IBS)
+    tokens = re.split(r"[^a-z0-9]+", s.strip())
+    tokens = [re.escape(t) for t in tokens if t]
+    if not tokens: 
+        return r"$^"
+    return r"\b" + r"\W+".join(tokens) + r"\b"
+
+_HEALTH_APP_SYNONYMS = {
+    "Digestive Health": [r"\bdigesti(ve|on)\b", r"\bgut\s+health\b"],
+    "Immune System Health": [r"\bimmune(\s+system)?\s+health\b", r"\bimmune\s+support\b", r"\bimmunity\s+support\b", r"\bboost\s+immun"],
+    "Joint Health": [r"\bjoint\s+health\b", r"\bhealthy\s+joints\b"],
+    "Joint Support": [r"\bjoint\s+support\b"],
+    "Joint Pain": [r"\bjoint\s+pain\b", r"\barthriti[cs]\b", r"\barthritic\s+pain\b"],
+    "Sleep Support": [r"\bsleep\s+support\b", r"\bbetter\s+sleep\b", r"\bpromotes\s+sleep\b", r"\bsleep\s+quality\b"],
+    "Sleep Disturbance": [r"\bsleep\s+disturbance\b", r"\btrouble\s+sleep(ing)?\b"],
+    "Insomnia": [r"\binsomnia\b"],
+    "Energy": [r"\benergy\b", r"\benergiz", r"\bpre[-\s]?workout\b"],
+    "Endurance": [r"\bendurance\b", r"\bstamina\b"],
+    "Stress": [r"\bstress\b", r"\bstress\s+relief\b", r"\bstress\s+support\b"],
+    "Anxiety": [r"\banxiety\b"],
+    "Weight Loss": [r"\bweight\s+loss\b", r"\bfat\s+loss\b", r"\bslim(ming)?\b"],
+    "Weight Management": [r"\bweight\s+management\b", r"\bmanage\s+weight\b", r"\bmaintain\s+weight\b"],
+    "Bone Health": [r"\bbone\s+health\b", r"\bbone\s+density\b", r"\bosteoporosis\b"],
+    "Heart Health": [r"\bheart\s+health\b", r"\bcardio(vascular)?\b"],
+    "Skin Health": [r"\bskin\s+health\b", r"\bhealthy\s+skin\b"],
+    "Hair, Skin and Nail Health": [r"\bhair[, ]+\s*skin\s*(and|&)?\s*nail", r"\bhair\s*skin\s*and\s*nails\b"],
+    "Memory and Brain Health": [r"\bmemory\b", r"\bbrain\s+health\b", r"\bcognit(ive|ion)\b", r"\bfocus\b", r"\bconcentration\b", r"\bnootropic\b"],
+    "Hydration": [r"\bhydrat(e|ion)\b", r"\belectrolyte(s)?\b"],
+    "Cholesterol Level Maintenance": [r"\bcholesterol\b", r"\bmaintain\s+cholesterol\b", r"\bhealthy\s+cholesterol\b"],
+    "High Cholesterol": [r"\bhigh\s+cholesterol\b"],
+    "Blood Sugar Imbalance": [r"\bblood\s+sugar\b", r"\bglucose\b", r"\bglycem(i|y)c\b"],
+    "Children's Health": [r"\b(children|kids|child)\b.*\bhealth\b", r"\bfor\s+(kids|children)\b"],
+    "Men's Health": [r"\b(men|male)\b.*\bhealth\b", r"\bfor\s+men\b"],
+    "Women's Health": [r"\b(women|female)\b.*\bhealth\b", r"\bfor\s+women\b"],
+    "Irritable Bowel Syndrome (IBS)": [r"\birritable\s+bowel\s+syndrome\b", r"\bIBS\b"],
+    "eye health": [r"\beye\s+health\b", r"\bvision\b", r"\bocular\b"],
+    "Nervous System Health": [r"\bnervous\s+system\b", r"\bneurolog(y|ical)\b"],
+    "Respiratory Health": [r"\brespiratory\b", r"\blung\b", r"\bbreath(ing)?\b"],
+    "Sports Performance": [r"\bsports?\s+performance\b", r"\bathletic\b", r"\bperformance\b"],
+    "Strength": [r"\bstrength\b", r"\bstronger\b"],
+    "Pain Relief": [r"\bpain\s+relief\b", r"\banalgesic\b"],
+    "Mood": [r"\bmood\b"],
+    "Metabolism": [r"\bmetaboli[sc]m\b"],
+}
+
+_HEALTH_APP_REGEX = {}
+for label in _HEALTH_APP_LABELS:
+    pats = [ _make_base_pat(label) ]
+    pats.extend(_HEALTH_APP_SYNONYMS.get(label, []))
+    _HEALTH_APP_REGEX[label] = [re.compile(p, re.I) for p in pats]
+
+def _health_score(text: str, comp_list) -> int:
+    if not text: return 0
+    return sum(1 for rx in comp_list if rx.search(text))
+
+def infer_health_app_from_columns(row: pd.Series, ordered_cols: list[str]) -> str:
+    """
+    Returns 0–5 labels joined by '|', picking highest scores first.
+    Weighted by SEO column importance: Title(3) > Bullets(2) > Description(1).
+    """
+    scores = {label:0 for label in _HEALTH_APP_REGEX.keys()}
+    for c in ordered_cols:
+        txt = str(row.get(c, "")) or ""
+        if not txt: 
+            continue
+        weight = _column_priority_score(c)
+        for label, comp_list in _HEALTH_APP_REGEX.items():
+            hits = _health_score(txt, comp_list)
+            if hits:
+                scores[label] += weight * hits
+    picks = [(k, v) for k, v in scores.items() if v > 0]
+    if not picks:
+        return ""
+    picks.sort(key=lambda kv: (-kv[1], kv[0]))
+    # Max selections 3–5 → we allow up to 5; fewer is fine if fewer detected
+    return "|".join([k for k, _ in picks[:5]])
 
 # ── ZIP / XML helpers ────────────────────────────────────────────────
 def _find_sheet_part_path(z: zipfile.ZipFile, sheet_name: str) -> str:
@@ -554,16 +614,18 @@ if go:
         else:
             st.warning("No category column detected — no filtering applied.")
 
-        # Step 3.7: infer Gender and Health & Beauty Subtype from SEO columns
+        # Step 3.7: infer Gender, Subtype, and Health Application from SEO columns  ← ONLY CHANGE IS NEW COLUMN
         try:
             seo_cols = select_seo_columns(on_df)
             ordered = order_seo_columns(seo_cols)
             on_df["Gender"] = on_df.apply(lambda r: infer_gender_from_columns(r, ordered), axis=1)
-            # NEW column exactly as requested (will map if template header matches; norm() handles case)
             on_df["health and beauty subtype*"] = on_df.apply(lambda r: infer_hb_subtype_from_columns(r, ordered), axis=1)
+            # NEW: Health Application* (max 5, '|' delimited)
+            on_df["Health Application*"] = on_df.apply(lambda r: infer_health_app_from_columns(r, ordered), axis=1)
         except Exception:
             on_df["Gender"] = "Gender Neutral"
             on_df["health and beauty subtype*"] = ""
+            on_df["Health Application*"] = ""
 
         # refresh headers so mapping sees the new columns
         on_headers = list(on_df.columns)
