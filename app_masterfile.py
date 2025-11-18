@@ -83,17 +83,16 @@ def safe_filename(name: str, fallback: str = "final_masterfile"):
     name = re.sub(r"[^A-Za-z0-9._ -]+", "", name.strip())
     return name or fallback
 
-# ── Gender inference (already added) ─────────────────────────────────
+# ── Gender inference ─────────────────────────────────────────────────
 _APOS = r"[’']"
 _GENDER_W = re.compile(rf"\b(women(?:{_APOS}s)?|woman|female|lad(?:y|ies))\b", re.I)
 _GENDER_M = re.compile(rf"\b(men(?:{_APOS}s)?|man|male|gent(?:lemen)?)\b", re.I)
 _UNISEX   = re.compile(r"\b(unisex|all genders|everyone|for all|men\s*&\s*women|women\s*&\s*men)\b", re.I)
-
 def _has_w(text: str) -> bool: return bool(_GENDER_W.search((text or "")))
 def _has_m(text: str) -> bool: return bool(_GENDER_M.search((text or "")))
 def _is_unisex(text: str) -> bool: return bool(_UNISEX.search((text or "").lower()))
 
-# ── SEO field aliases (provided) ─────────────────────────────────────
+# ── Use THESE SEO fields to analyze content ──────────────────────────
 SEO_ALIASES = {
     "Product Name": ["Product Name", "item_name", "Item Name", "Walmart Title - en-US", "Title"],
     "Description": ["Product Description", "Description", "long_description", "Walmart Description - en-US"],
@@ -103,7 +102,6 @@ SEO_ALIASES = {
     "bullet_point4": ["Bullet point 4","bullet_point4", "Bullet Feature 4", "bullet point 4", "bullet_point4 - en-US", "Key Features #4 - en-US"],
     "bullet_point5": ["Bullet point 5","bullet_point5", "Bullet Feature 5", "bullet point 5", "bullet_point5 - en-US", "Key Features #5 - en-US"],
 }
-
 def select_seo_columns(df: pd.DataFrame) -> list[str]:
     header_lookup = {norm(c): c for c in df.columns}
     picks = []
@@ -119,14 +117,12 @@ def select_seo_columns(df: pd.DataFrame) -> list[str]:
         return picks
     heur = [c for c in df.columns if any(k in norm(c) for k in ["title","product name","description","bullet","feature","name"])]
     return heur if heur else list(df.columns)
-
 def _column_priority_score(col_name: str) -> int:
     n = norm(col_name)
     if "title" in n or "product name" in n: return 3
     if "bullet" in n or "feature" in n:     return 2
     if "description" in n:                   return 1
     return 0
-
 def order_seo_columns(cols: list[str]) -> list[str]:
     return sorted(cols, key=_column_priority_score, reverse=True)
 
@@ -150,7 +146,7 @@ def infer_gender_from_columns(row: pd.Series, ordered_cols: list[str]) -> str:
     if any_m: return "Men"
     return "Gender Neutral"
 
-# ── Health & Beauty Subtype (existing) ───────────────────────────────
+# ── Health & Beauty Subtype (max 3, '|' delimited) ───────────────────
 _EXCLUDE_NON_POWDER = re.compile(r"\b(protein\s+bar|protein\s+cookie|protein\s+shake|ready[-\s]?to[-\s]?drink|rtd)\b", re.I)
 _HB_SUBTYPE_PATTERNS = {
     "Collagen": [r"\bcollagen\b", r"\bcollagen\s+peptid(e|es)\b", r"\bhydrol(y|i)zed\s+collagen\b", r"\bmarine\s+collagen\b", r"\btype\s*(i|ii|iii)\b"],
@@ -186,9 +182,9 @@ def infer_hb_subtype_from_columns(row: pd.Series, ordered_cols: list[str]) -> st
     if not picks:
         return ""
     picks.sort(key=lambda kv: (-kv[1], kv[0]))
-    return "|".join([k for k, _ in picks[:3]])  # max 3
+    return "|".join([k for k, _ in picks[:3]])  # ≤3
 
-# ── Health Application* (existing from prior step) ───────────────────
+# ── Health Application* (max 5, '|' delimited) ───────────────────────
 _HEALTH_APP_LABELS = [
     "Adrenal Health","Aging","Allergies","Anxiety","Bladder Infection","Bladder Support","Bloating","Blood Clots",
     "Blood Sugar Imbalance","Bone Health","Children's Health","Cholesterol Level Maintenance","Circulatory System Health",
@@ -276,8 +272,7 @@ def infer_health_app_from_columns(row: pd.Series, ordered_cols: list[str]) -> st
     picks.sort(key=lambda kv: (-kv[1], kv[0]))
     return "|".join([k for k, _ in picks[:5]])  # ≤5
 
-# ── NEW: Targeted Audience* inference ────────────────────────────────
-# Values: Adult, Infant, Kids, Teen  (choose 1; fallback Adult)
+# ── Targeted Audience* (single value; default Adult) ─────────────────
 _AUD_PAT = {
     "Infant": [r"\bbaby|babies|infant|newborn\b", r"\b0\s*[-–]?\s*12\s*(m|mos|months)\b"],
     "Kids":   [r"\bkid(s)?\b", r"\bchild(ren)?\b", r"\btoddler(s)?\b", r"\bpre[-\s]?school\b"],
@@ -287,10 +282,8 @@ _AUD_PAT = {
 _AGE_YEARS_RX = re.compile(r"\b(\d{1,2})\s*(?:\+|plus)?\s*(?:y(?:rs?)?|years?)\b", re.I)
 _AGE_RANGE_YEARS_RX = re.compile(r"\b(\d{1,2})\s*[-–]\s*(\d{1,2})\s*(?:y(?:rs?)?|years?)\b", re.I)
 _AGE_MONTHS_RX = re.compile(r"\b(\d{1,2})\s*(?:m|mos|months?)\b", re.I)
-
 def _aud_bump(scores: dict, label: str, w: int = 1):
     scores[label] = scores.get(label, 0) + w
-
 def _age_to_bucket(years: int | None = None, months: int | None = None) -> str | None:
     if months is not None:
         if months <= 24: return "Infant"
@@ -302,45 +295,36 @@ def _age_to_bucket(years: int | None = None, months: int | None = None) -> str |
         if 13 <= years <= 17: return "Teen"
         if years >= 18: return "Adult"
     return None
-
 def infer_targeted_audience(row: pd.Series, ordered_cols: list[str], gender_val: str = "") -> str:
     scores = {"Adult":0, "Infant":0, "Kids":0, "Teen":0}
-    # Gender backstop → implies adult
     if str(gender_val).strip() in ("Men","Women"):
         _aud_bump(scores, "Adult", 2)
-
     for c in ordered_cols:
         txt = str(row.get(c, "")) or ""
         if not txt: 
             continue
-        w = _column_priority_score(c)  # Title 3 > Bullets 2 > Description 1
-        # Lexical bumps
+        w = _column_priority_score(c)
         for label, pats in _AUD_PAT.items():
             for p in pats:
                 if re.search(p, txt, re.I):
                     _aud_bump(scores, label, w)
-        # Ages (single)
         for m in _AGE_YEARS_RX.finditer(txt):
             y = int(m.group(1))
             bucket = _age_to_bucket(years=y)
             if bucket: _aud_bump(scores, bucket, w+1)
-        # Ages (range)
         for m in _AGE_RANGE_YEARS_RX.finditer(txt):
             y1, y2 = int(m.group(1)), int(m.group(2))
             for y in (y1, y2):
                 bucket = _age_to_bucket(years=y)
                 if bucket: _aud_bump(scores, bucket, w+1)
-        # Months
         for m in _AGE_MONTHS_RX.finditer(txt):
             mo = int(m.group(1))
             bucket = _age_to_bucket(months=mo)
             if bucket: _aud_bump(scores, bucket, w+1)
-
-    # Pick best; tie-breaker prefers more specific over Adult
     order = ["Infant","Kids","Teen","Adult"]
     best = max(order, key=lambda lab: (scores.get(lab,0), -order.index(lab)))
     if scores.get(best,0) == 0:
-        return "Adult"  # default fill if nothing detected
+        return "Adult"
     return best
 
 # ── ZIP / XML helpers ────────────────────────────────────────────────
@@ -668,16 +652,14 @@ if go:
         else:
             st.warning("No category column detected — no filtering applied.")
 
-        # Step 3.7: infer from SEO columns (Gender, Subtype, Health Apps, Targeted Audience, Legal) ── ONLY small additions here
+        # Step 3.7: infer from SEO columns (using provided attribute names)
         try:
             seo_cols = select_seo_columns(on_df)
             ordered = order_seo_columns(seo_cols)
             on_df["Gender"] = on_df.apply(lambda r: infer_gender_from_columns(r, ordered), axis=1)
             on_df["health and beauty subtype*"] = on_df.apply(lambda r: infer_hb_subtype_from_columns(r, ordered), axis=1)
             on_df["Health Application*"] = on_df.apply(lambda r: infer_health_app_from_columns(r, ordered), axis=1)
-            # NEW: Targeted Audience* (Adult/Infant/Kids/Teen, default Adult)
             on_df["Targeted Audience*"] = on_df.apply(lambda r: infer_targeted_audience(r, ordered, r.get("Gender","")), axis=1)
-            # NEW: Legally Required Information* (always filled)
             on_df["Legally Required Information*"] = "Healthcare Disclaimer"
         except Exception:
             on_df["Gender"] = "Gender Neutral"
@@ -727,7 +709,7 @@ if go:
         # Step 6: write file
         slog("⏳ **Step 6/6:** Writing final masterfile via fast XML...", 0.85)
         out_bytes = fast_patch_template(master_bytes=master_bytes, sheet_name=MASTER_TEMPLATE_SHEET,
-                                        header_row=MASTER_DISPLAY_ROW, start_row=master_SECONDARY_ROW+1 if False else  MASTER_DATA_START_ROW,
+                                        header_row=MASTER_DISPLAY_ROW, start_row=MASTER_DATA_START_ROW,
                                         used_cols=used_cols, block_2d=block)
         st.success("🎉 **Complete!**")
         final_base = safe_filename(final_name_input, fallback="target_final_masterfile")
