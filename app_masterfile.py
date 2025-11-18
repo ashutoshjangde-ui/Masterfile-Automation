@@ -83,16 +83,17 @@ def safe_filename(name: str, fallback: str = "final_masterfile"):
     name = re.sub(r"[^A-Za-z0-9._ -]+", "", name.strip())
     return name or fallback
 
-# ── Gender inference ─────────────────────────────────────────────────
+# ── Gender inference (already added) ─────────────────────────────────
 _APOS = r"[’']"
 _GENDER_W = re.compile(rf"\b(women(?:{_APOS}s)?|woman|female|lad(?:y|ies))\b", re.I)
 _GENDER_M = re.compile(rf"\b(men(?:{_APOS}s)?|man|male|gent(?:lemen)?)\b", re.I)
 _UNISEX   = re.compile(r"\b(unisex|all genders|everyone|for all|men\s*&\s*women|women\s*&\s*men)\b", re.I)
+
 def _has_w(text: str) -> bool: return bool(_GENDER_W.search((text or "")))
 def _has_m(text: str) -> bool: return bool(_GENDER_M.search((text or "")))
 def _is_unisex(text: str) -> bool: return bool(_UNISEX.search((text or "").lower()))
 
-# ── Use THESE SEO fields to analyze content ──────────────────────────
+# ── SEO field aliases (provided) ─────────────────────────────────────
 SEO_ALIASES = {
     "Product Name": ["Product Name", "item_name", "Item Name", "Walmart Title - en-US", "Title"],
     "Description": ["Product Description", "Description", "long_description", "Walmart Description - en-US"],
@@ -117,6 +118,7 @@ def select_seo_columns(df: pd.DataFrame) -> list[str]:
         return picks
     heur = [c for c in df.columns if any(k in norm(c) for k in ["title","product name","description","bullet","feature","name"])]
     return heur if heur else list(df.columns)
+
 def _column_priority_score(col_name: str) -> int:
     n = norm(col_name)
     if "title" in n or "product name" in n: return 3
@@ -146,7 +148,7 @@ def infer_gender_from_columns(row: pd.Series, ordered_cols: list[str]) -> str:
     if any_m: return "Men"
     return "Gender Neutral"
 
-# ── Health & Beauty Subtype (max 3, '|' delimited) ───────────────────
+# ── Health & Beauty Subtype inference (max 3) ────────────────────────
 _EXCLUDE_NON_POWDER = re.compile(r"\b(protein\s+bar|protein\s+cookie|protein\s+shake|ready[-\s]?to[-\s]?drink|rtd)\b", re.I)
 _HB_SUBTYPE_PATTERNS = {
     "Collagen": [r"\bcollagen\b", r"\bcollagen\s+peptid(e|es)\b", r"\bhydrol(y|i)zed\s+collagen\b", r"\bmarine\s+collagen\b", r"\btype\s*(i|ii|iii)\b"],
@@ -184,7 +186,7 @@ def infer_hb_subtype_from_columns(row: pd.Series, ordered_cols: list[str]) -> st
     picks.sort(key=lambda kv: (-kv[1], kv[0]))
     return "|".join([k for k, _ in picks[:3]])  # ≤3
 
-# ── Health Application* (max 5, '|' delimited) ───────────────────────
+# ── Health Application* (max 5) ──────────────────────────────────────
 _HEALTH_APP_LABELS = [
     "Adrenal Health","Aging","Allergies","Anxiety","Bladder Infection","Bladder Support","Bloating","Blood Clots",
     "Blood Sugar Imbalance","Bone Health","Children's Health","Cholesterol Level Maintenance","Circulatory System Health",
@@ -207,7 +209,7 @@ def _make_base_pat(label: str) -> str:
     s = re.sub(r"\s*\(.*?\)\s*", "", s)
     tokens = re.split(r"[^a-z0-9]+", s.strip())
     tokens = [re.escape(t) for t in tokens if t]
-    if not tokens: 
+    if not tokens:
         return r"$^"
     return r"\b" + r"\W+".join(tokens) + r"\b"
 _HEALTH_APP_SYNONYMS = {
@@ -326,6 +328,99 @@ def infer_targeted_audience(row: pd.Series, ordered_cols: list[str], gender_val:
     if scores.get(best,0) == 0:
         return "Adult"
     return best
+
+# ── NEW: Product Form* (single; 'Multiple Forms' if >1 strong) ───────
+# Valid values:
+# Bar, Caplet, Capsule, Chewable, Chewable Tablet, Cream, Dissolving Strip,
+# Dissolving Tablet, Gel, Gelcap, Gum, Gummy, Liquid, Lollipop, Lozenge,
+# Multiple Forms, Patch, Powder, Softgel, Tablet, Tea, Wafer
+_PRODUCT_FORM_PATTERNS = {
+    "Bar":               [r"\b(protein|nutrition)\s+bar\b", r"\bbar\b"],
+    "Caplet":            [r"\bcaplet(s)?\b"],
+    "Capsule":           [r"\bcapsule(s)?\b", r"\bcaps?\b", r"\bveg(?:etable)?\s*caps?(?:ule)?s?\b"],
+    "Chewable Tablet":   [r"\bchewable\s+tablet(s)?\b", r"\bODT\b", r"\borally\s+disintegrating\s+tablet(s)?\b", r"\bfast[-\s]?dissolv(e|ing)\s+tablet(s)?\b"],
+    "Chewable":          [r"\bchewable\b"],
+    "Cream":             [r"\bcream(s)?\b"],
+    "Dissolving Strip":  [r"\bdissolving\s+strip(s)?\b", r"\boral\s+strip(s)?\b", r"\bmouth\s+strip(s)?\b"],
+    "Dissolving Tablet": [r"\bdissolving\s+tablet(s)?\b", r"\beffervescent\s+tablet(s)?\b", r"\bsublingual\s+tablet(s)?\b"],
+    "Gel":               [r"\btopical\s+gel\b", r"\bgel\b"],
+    "Gelcap":            [r"\bgel[-\s]?cap(s)?\b", r"\bgelcap(s)?\b"],
+    "Gum":               [r"\bgum\b"],
+    "Gummy":             [r"\bgummy\b", r"\bgummies\b"],
+    "Liquid":            [r"\bliquid\b", r"\bsyrup\b", r"\bdrops?\b", r"\belixir\b", r"\btincture\b", r"\bsuspension\b", r"\bsolution\b"],
+    "Lollipop":          [r"\blollipop(s)?\b"],
+    "Lozenge":           [r"\blozenge(s)?\b", r"\bpastille(s)?\b", r"\btroche(s)?\b", r"\bthroat\s+drops?\b", r"\bcough\s+drops?\b"],
+    "Patch":             [r"\bpatch(es)?\b", r"\btransdermal\b"],
+    "Powder":            [r"\bpowder(ed)?\b", r"\bdrink\s+mix\b"],
+    "Softgel":           [r"\bsoft[-\s]?gel(s)?\b", r"\bsoftgel(s)?\b"],
+    "Tablet":            [r"\btablet(s)?\b", r"\btabs?\b"],
+    "Tea":               [r"\btea\b(?!\s*tree)"],
+    "Wafer":             [r"\bwafer(s)?\b"],
+}
+# Exclusions to avoid false positives and overlap
+_PF_EXCLUDE = {
+    "Gel": [r"\bsoft[-\s]?gel(s)?\b", r"\bgel[-\s]?cap(s)?\b", r"\bgelcap(s)?\b"],
+    "Capsule": [r"\bsoft[-\s]?gel(s)?\b", r"\bgelcap(s)?\b", r"\bgel[-\s]?cap(s)?\b"],
+    "Chewable": [r"\bchewable\s+tablet(s)?\b", r"\bgummies?\b"],
+    "Liquid": [r"\bliquid\s+softgel(s)?\b"],
+    "Tablet": [r"\bchewable\s+tablet(s)?\b", r"\bdissolving\s+tablet(s)?\b", r"\beffervescent\s+tablet(s)?\b", r"\bsublingual\s+tablet(s)?\b"],
+    "Gum": [r"\bgummies?\b"],
+    "Tea": [r"\btea\s*tree\b"],  # ingredient, not form
+}
+
+def _match_any(rx_list, text) -> int:
+    if not text: return 0
+    return sum(1 for p in rx_list if re.search(p, text, re.I))
+
+def _excluded(label: str, text: str) -> bool:
+    for p in _PF_EXCLUDE.get(label, []):
+        if re.search(p, text, re.I):
+            return True
+    return False
+
+def infer_product_form_from_columns(row: pd.Series, ordered_cols: list[str]) -> str:
+    # Weighted scoring per column priority
+    scores = {k:0 for k in _PRODUCT_FORM_PATTERNS.keys()}
+    for c in ordered_cols:
+        txt = str(row.get(c, "")) or ""
+        if not txt:
+            continue
+        w = _column_priority_score(c)
+        for label, pats in _PRODUCT_FORM_PATTERNS.items():
+            if _excluded(label, txt):
+                continue
+            hits = _match_any(pats, txt)
+            if hits:
+                scores[label] += w * hits
+
+    # Preference adjustments: specific beats generic
+    # If Chewable Tablet hit, downweight Chewable; if Softgel/Gelcap hit, downweight Capsule/Gel
+    if scores["Chewable Tablet"] > 0:
+        scores["Chewable"] = 0
+        scores["Tablet"] = max(0, scores["Tablet"] - 1)
+    if scores["Dissolving Tablet"] > 0:
+        scores["Tablet"] = 0
+    if scores["Softgel"] > 0 or scores["Gelcap"] > 0:
+        scores["Capsule"] = 0
+        scores["Gel"] = max(0, scores["Gel"] - 1)
+    if scores["Gummy"] > 0:
+        scores["Gum"] = 0
+    if scores["Gelcap"] > 0 and scores["Softgel"] == 0:
+        # leave Gelcap as its own form if only gelcap mentioned
+        pass
+
+    # Decide
+    picks = [(k, v) for k, v in scores.items() if v > 0]
+    if not picks:
+        return ""
+
+    picks.sort(key=lambda kv: (-kv[1], kv[0]))
+    top_label, top_score = picks[0]
+    other_score = sum(v for _, v in picks[1:])
+
+    if len(picks) >= 2 and top_score < other_score * 1.5:
+        return "Multiple Forms"
+    return top_label
 
 # ── ZIP / XML helpers ────────────────────────────────────────────────
 def _find_sheet_part_path(z: zipfile.ZipFile, sheet_name: str) -> str:
@@ -661,12 +756,15 @@ if go:
             on_df["Health Application*"] = on_df.apply(lambda r: infer_health_app_from_columns(r, ordered), axis=1)
             on_df["Targeted Audience*"] = on_df.apply(lambda r: infer_targeted_audience(r, ordered, r.get("Gender","")), axis=1)
             on_df["Legally Required Information*"] = "Healthcare Disclaimer"
+            # NEW: Product Form*
+            on_df["Product Form*"] = on_df.apply(lambda r: infer_product_form_from_columns(r, ordered), axis=1)
         except Exception:
             on_df["Gender"] = "Gender Neutral"
             on_df["health and beauty subtype*"] = ""
             on_df["Health Application*"] = ""
             on_df["Targeted Audience*"] = "Adult"
             on_df["Legally Required Information*"] = "Healthcare Disclaimer"
+            on_df["Product Form*"] = ""
 
         # refresh headers so mapping sees the new columns
         on_headers = list(on_df.columns)
