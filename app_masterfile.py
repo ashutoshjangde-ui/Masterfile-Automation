@@ -83,11 +83,12 @@ def safe_filename(name: str, fallback: str = "final_masterfile"):
     name = re.sub(r"[^A-Za-z0-9._ -]+", "", name.strip())
     return name or fallback
 
-# ── Gender inference ─────────────────────────────────────────────────
+# ── Gender inference (title-first override; broader coverage) ────────
 _APOS = r"[’']"
-_GENDER_W = re.compile(rf"\b(women(?:{_APOS}s)?|woman|female|lad(?:y|ies))\b", re.I)
-_GENDER_M = re.compile(rf"\b(men(?:{_APOS}s)?|man|male|gent(?:lemen)?)\b", re.I)
-_UNISEX   = re.compile(r"\b(unisex|all genders|everyone|for all|men\s*&\s*women|women\s*&\s*men)\b", re.I)
+_GENDER_W = re.compile(rf"\b(women(?:{_APOS}s)?|womens|woman|female|lad(?:y|ies)|for\s+her)\b", re.I)
+_GENDER_M = re.compile(rf"\b(men(?:{_APOS}s)?|mens|man|male|gent(?:lemen)?|for\s+him)\b", re.I)
+_UNISEX   = re.compile(r"\b(unisex|his\s*&\s*her(s)?|his\s+and\s+her(s)?|all\s+genders|everyone|for\s+all|men\s*&\s*women|women\s*&\s*men)\b", re.I)
+
 def _has_w(text: str) -> bool: return bool(_GENDER_W.search((text or "")))
 def _has_m(text: str) -> bool: return bool(_GENDER_M.search((text or "")))
 def _is_unisex(text: str) -> bool: return bool(_UNISEX.search((text or "").lower()))
@@ -102,7 +103,7 @@ SEO_ALIASES = {
     "bullet_point4": ["Bullet point 4","bullet_point4", "Bullet Feature 4", "bullet point 4", "bullet_point4 - en-US", "Key Features #4 - en-US"],
     "bullet_point5": ["Bullet point 5","bullet_point5", "Bullet Feature 5", "bullet point 5", "bullet_point5 - en-US", "Key Features #5 - en-US"],
 }
-def select_seo_columns(df: pd.DataFrame) -> list[str]:
+def select_seo_columns(df: pd.DataFrame):
     header_lookup = {norm(c): c for c in df.columns}
     picks = []
     for _, aliases in SEO_ALIASES.items():
@@ -121,20 +122,23 @@ def _column_priority_score(col_name: str) -> int:
     if "bullet" in n or "feature" in n:     return 2
     if "description" in n:                   return 1
     return 0
-def order_seo_columns(cols: list[str]) -> list[str]:
-    return sorted(cols, key=_column_priority_score, reverse=True)
-def infer_gender_from_columns(row: pd.Series, ordered_cols: list[str]) -> str:
-    for c in ordered_cols:
-        t = str(row.get(c, ""))
-        if _is_unisex(t): return "Gender Neutral"
-    any_w = False; any_m = False
-    for c in ordered_cols:
-        t = str(row.get(c, ""))
-        w = _has_w(t); m = _has_m(t)
-        any_w = any_w or w
-        any_m = any_m or m
-        if w and not m: return "Women"
-        if m and not w: return "Men"
+def order_seo_columns(cols): return sorted(cols, key=_column_priority_score, reverse=True)
+
+def infer_gender_from_columns(row: pd.Series, ordered_cols) -> str:
+    # 1) TITLE-FIRST OVERRIDE
+    prim = [c for c in ordered_cols if _column_priority_score(c) == 3] or ordered_cols[:1]
+    prim_text = " ".join(str(row.get(c, "")) for c in prim)
+    pw, pm = _has_w(prim_text), _has_m(prim_text)
+    if pw and not pm: return "Women"
+    if pm and not pw: return "Men"
+    if pw and pm:     return "Gender Neutral"
+
+    # 2) Otherwise consider unisex; then weighted signals
+    all_text = " ".join(str(row.get(c,"")) for c in ordered_cols)
+    if _is_unisex(all_text): return "Gender Neutral"
+
+    any_w = any(_has_w(str(row.get(c,""))) for c in ordered_cols)
+    any_m = any(_has_m(str(row.get(c,""))) for c in ordered_cols)
     if any_w and any_m: return "Gender Neutral"
     if any_w: return "Women"
     if any_m: return "Men"
@@ -145,20 +149,21 @@ SUBTYPE_VALUES = [
     "Collagen","Protein Powder","Multivitamins",
     "Vitamin A","Vitamin B","Vitamin C","Vitamin D","Vitamin E","Vitamin K"
 ]
-_COLLAGEN_RX = re.compile(r"\bcollagen\b", re.I)
+# Expanded coverage
+_COLLAGEN_RX = re.compile(r"\b(collagen|collagen\s+peptid(e|es)|hydroly(z|s)ed\s+collagen|type\s*(i|ii|iii)\b|marine\s+collagen)\b", re.I)
 _PROTEIN_POWDER_RX = re.compile(
-    r"(\bprotein\s+powder\b|\bwhey\b|\bcasein\b|\bprotein\s+isolate\b|\bprotein\s+concentrate\b|\bpea\s+protein\b|\bsoy\s+protein\b|\brice\s+protein\b|\bprotein\s+blend\b)",
+    r"(\bprotein\s+powder\b|\bwhey\b|\bcasein\b|\b(isolate|concentrate)\b|\bpea\s+protein\b|\bsoy\s+protein\b|\brice\s+protein\b|\bprotein\s+blend\b|\bmicellar\s+casein\b)",
     re.I
 )
-_EXCLUDE_NON_POWDER = re.compile(r"\b(protein\s+bar|protein\s+shake|ready[-\s]?to[-\s]?drink)\b", re.I)
+_EXCLUDE_NON_POWDER = re.compile(r"\b(protein\s+bar|protein\s+shake|ready[-\s]?to[-\s]?drink|rt[dD])\b", re.I)
 _MULTI_RX   = re.compile(r"\bmulti[-\s]?vitamin(s)?\b", re.I)
 _VITA = {
-    "Vitamin A": [re.compile(r"\bvitamin\s*a\b", re.I), re.compile(r"\bretinol\b", re.I)],
-    "Vitamin B": [re.compile(r"\bvitamin\s*b(\d{1,2})?\b", re.I), re.compile(r"\bb[-\s]?complex\b", re.I)],
-    "Vitamin C": [re.compile(r"\bvitamin\s*c\b", re.I), re.compile(r"\bascorbic\s+acid\b", re.I)],
-    "Vitamin D": [re.compile(r"\bvitamin\s*d\b", re.I), re.compile(r"\bd3\b", re.I), re.compile(r"\bd2\b", re.I), re.compile(r"\bcholecalciferol\b", re.I)],
-    "Vitamin E": [re.compile(r"\bvitamin\s*e\b", re.I), re.compile(r"\btocopherol\b", re.I)],
-    "Vitamin K": [re.compile(r"\bvitamin\s*k\b", re.I), re.compile(r"\bmenaquinone\b", re.I), re.compile(r"\bphylloquinone\b", re.I)],
+    "Vitamin A": [re.compile(r"\bvit(amin)?\s*a\b", re.I), re.compile(r"\bretinol\b", re.I)],
+    "Vitamin B": [re.compile(r"\bvit(amin)?\s*b(\d{1,2})?\b", re.I), re.compile(r"\bb[-\s]?complex\b", re.I)],
+    "Vitamin C": [re.compile(r"\bvit(amin)?\s*c\b", re.I), re.compile(r"\bascorb(ic|ate)\b", re.I)],
+    "Vitamin D": [re.compile(r"\bvit(amin)?\s*d\b", re.I), re.compile(r"\bd3\b", re.I), re.compile(r"\bd2\b", re.I), re.compile(r"\bcholecalciferol\b", re.I)],
+    "Vitamin E": [re.compile(r"\bvit(amin)?\s*e\b", re.I), re.compile(r"\btocopherol\b", re.I)],
+    "Vitamin K": [re.compile(r"\bvit(amin)?\s*k\b", re.I), re.compile(r"\bk2\b", re.I), re.compile(r"\bmenaquinone\b", re.I), re.compile(r"\bphylloquinone\b", re.I)],
 }
 def _score_subtype_text(txt: str, weight: int, scores: dict):
     if not txt: return
@@ -169,7 +174,7 @@ def _score_subtype_text(txt: str, weight: int, scores: dict):
     for k, pats in _VITA.items():
         if any(p.search(txt) for p in pats):
             scores[k] = scores.get(k,0)+weight
-def infer_hb_subtypes_multi(row: pd.Series, ordered_cols: list[str], top_k: int = 3) -> str:
+def infer_hb_subtypes_multi(row: pd.Series, ordered_cols, top_k: int = 3) -> str:
     scores = {}
     for c in ordered_cols:
         w = _column_priority_score(c) or 1
@@ -202,7 +207,7 @@ APP_SYNONYMS = {
     "Skin Health": [r"\bskin\b"],
     "Joint Health": [r"\bjoint health\b", r"\bjoint\b"],
     "Joint Support": [r"\bjoint support\b"],
-    "Joint Pain": [r"\bjoint pain\b", r"\barthritis\b"],
+    "Joint Pain": [r"\bjoint pain\b", r"\barthriti[cs]\b"],
     "Bone Health": [r"\bbone\b", r"\bosteoporosis\b", r"\bcalcium\b"],
     "Heart Health": [r"\bheart\b", r"\bcardio(vascular)?\b"],
     "Memory and Brain Health": [r"\bbrain\b", r"\bmemory\b", r"\bcognitive\b", r"\bfocus\b"],
@@ -277,13 +282,9 @@ APP_SYNONYMS = {
     "Circulatory System Health": [r"\bcirculatory\b", r"\bcirculation\b"],
     "Pain Relief": [r"\bpain relief\b", r"\bpain\b"],
 }
-def _boosted_texts(row: pd.Series, ordered_cols: list[str]) -> list[tuple[str,int]]:
-    out = []
-    for c in ordered_cols:
-        w = _column_priority_score(c) or 1
-        out.append((str(row.get(c,"")), w))
-    return out
-def infer_health_apps_multi(row: pd.Series, ordered_cols: list[str], top_k: int = 5) -> str:
+def _boosted_texts(row: pd.Series, ordered_cols):
+    return [(str(row.get(c,"")), (_column_priority_score(c) or 1)) for c in ordered_cols]
+def infer_health_apps_multi(row: pd.Series, ordered_cols, top_k: int = 5) -> str:
     scores = {k:0 for k in HEALTH_APPS}
     texts = _boosted_texts(row, ordered_cols)
     canon_regex = {k: re.compile(r"\b" + re.sub(r"\s+","\\s+", re.escape(k)).replace(r"\'", r"[’']") + r"\b", re.I) for k in HEALTH_APPS}
@@ -304,19 +305,13 @@ _AUD_MAP = {
     "Infant": [r"\binfant(s)?\b", r"\bnewborn(s)?\b", r"\bbab(y|ies)\b"],
     "Kids": [r"\bkid(s)?\b", r"\bchild(ren)?\b", r"\btoddler(s)?\b", r"\bchildren['’]s\b"],
     "Teen": [r"\bteen(s|agers?)?\b", r"\badolescent(s)?\b", r"\byouth\b"],
-    "Adult": [r"\badult(s)?\b", r"\bmen\b", r"\bwomen\b"],  # also default
+    "Adult": [r"\badult(s)?\b", r"\bmen\b", r"\bwomen\b"],  # default if none explicit
 }
-def infer_audience(row: pd.Series, ordered_cols: list[str]) -> str:
+def infer_audience(row: pd.Series, ordered_cols) -> str:
     texts = " ".join(str(row.get(c,"")) for c in ordered_cols)
-    hits = []
-    for label, pats in _AUD_MAP.items():
-        if any(re.search(p, texts, flags=re.I) for p in pats):
-            hits.append(label)
-    if hits:
-        if "Infant" in hits: return "Infant"
-        if "Kids" in hits: return "Kids"
-        if "Teen" in hits: return "Teen"
-        return "Adult"
+    for label in ["Infant","Kids","Teen"]:  # strong specific before default
+        if any(re.search(p, texts, flags=re.I) for p in _AUD_MAP[label]):
+            return label
     return "Adult"
 
 # ── ZIP / XML helpers ────────────────────────────────────────────────
@@ -581,12 +576,28 @@ if go:
             st.error(f"❌ Invalid JSON format: {e}"); st.markdown("</div>", unsafe_allow_html=True); st.stop()
         if not isinstance(mapping_raw, dict):
             st.error('❌ Mapping JSON must be an object: {"Master header": [aliases...]}'); st.markdown("</div>", unsafe_allow_html=True); st.stop()
+
+        # Inject aliases so computed columns always map even if JSON omitted them
+        COMPUTED_ALIASES = {
+            "Gender": ["Gender","gender"],
+            "health and beauty subtype*": ["health and beauty subtype*","Health & Beauty Subtype","Health and Beauty Subtype"],
+            "Health Application*": ["Health Application*","Health Applications","health application*","health application"],
+            "Targeted Audience*": ["Targeted Audience*","Target Audience","targeted audience*"],
+            "Legally Required Information*": ["Legally Required Information*","Legally Required Information"],
+        }
+
         mapping_aliases = {}
         for k, v in mapping_raw.items():
             aliases = v[:] if isinstance(v, list) else [v]
             if k not in aliases: aliases.append(k)
             mapping_aliases[norm(k)] = aliases
-        slog(f"✅ Loaded {len(mapping_aliases)} header mappings", 0.2)
+        # add computed defaults if not present
+        for k, aliases in COMPUTED_ALIASES.items():
+            nk = norm(k)
+            if nk not in mapping_aliases:
+                mapping_aliases[nk] = aliases + [k]
+
+        slog(f"✅ Loaded {len(mapping_aliases)} header mappings (with computed aliases)", 0.2)
 
         # Step 2: template headers
         slog("⏳ **Step 2/6:** Reading template headers...", 0.3)
@@ -644,7 +655,7 @@ if go:
             # Gender
             on_df["Gender"] = on_df.apply(lambda r: infer_gender_from_columns(r, ordered), axis=1)
 
-            # health and beauty subtype* (multi, up to 3, '|' delimited)
+            # Health & Beauty Subtype* (multi, up to 3, '|' delimited)
             on_df["health and beauty subtype*"] = on_df.apply(lambda r: infer_hb_subtypes_multi(r, ordered, top_k=3), axis=1)
 
             # Health Application* (multi, up to 5, '|' delimited)
@@ -701,11 +712,16 @@ if go:
                     block[i][col-1] = v
         slog(f"✅ Built data block: {n_rows} rows × {used_cols} columns", 0.8)
 
-        # Step 6: write file
+        # Step 6: write file (fixed start_row var)
         slog("⏳ **Step 6/6:** Writing final masterfile via fast XML...", 0.85)
-        out_bytes = fast_patch_template(master_bytes=master_bytes, sheet_name=MASTER_TEMPLATE_SHEET,
-                                        header_row=MASTER_DISPLAY_ROW, start_row=master_SECONDARY_ROW+1 if False else  MASTER_DATA_START_ROW,
-                                        used_cols=used_cols, block_2d=block)
+        out_bytes = fast_patch_template(
+            master_bytes=master_bytes,
+            sheet_name=MASTER_TEMPLATE_SHEET,
+            header_row=MASTER_DISPLAY_ROW,
+            start_row=MASTER_DATA_START_ROW,
+            used_cols=used_cols,
+            block_2d=block
+        )
         st.success("🎉 **Complete!**")
         final_base = safe_filename(final_name_input, fallback="target_final_masterfile")
         final_filename = f"{final_base}{ext}"
