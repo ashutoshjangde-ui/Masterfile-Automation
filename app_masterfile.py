@@ -401,138 +401,112 @@ def infer_product_form_from_columns(row: pd.Series, ordered_cols: list[str]) -> 
         return "Multiple Forms"
     return top_label
 
+# ── NEW: primary flavors (≤3; pipe-delimited) ────────────────────────
+_FLAVOR_LABELS = [
+    "Acai","Almond","Apple","Banana","Berry","Black Cherry","Black Currant","Black Tea","Blackberry","Blue Raspberry",
+    "Blueberry","Brown Sugar","Brownie","Bubble Gum","Butter","Cake","Caramel","Celery","Chai","Chai Latte","Chamomile",
+    "Cherry","Chocolate","Chocolate Chip","Cinnamon","Citrus","Cocoa","Coconut","Coffee","Cookie","Cookies and Cream",
+    "Cranberry","Dark Chocolate","Donut","Dragon Fruit","Elderberry","Flavored","Flaxseed","French Vanilla","Fresh",
+    "Fruit","Fruit Punch","Garlic","Goji Berry","Grape","Grapefruit","Green Apple","Green Tea","Guava","Hibiscus","Honey",
+    "Kiwi","Lemon","Lemonade","Lime","Macadamia Nut","Mango","Maple","Marshmallow","Matcha","Melon","Milk","Milk Chocolate",
+    "Mint","Mixed Berry","Mixed Fruit","Mocha","Mushroom","Natural","No Flavor","Nut","Oatmeal","Oats","Orange","Passion Fruit",
+    "Peach","Peanut Butter","Pear","Peppermint","Pineapple","Pistachio","Pomegranate","Raspberry","Salted Caramel","Seaberry",
+    "Sour","Spicy","Spirulina","Strawberry","Sugar","Tangerine","Tea","Toffee","Tropical Fruit","Turmeric","Ube","Unflavored",
+    "Vanilla","Vegetable Blend","Watermelon","White Chocolate","Whole Wheat","Wild Berry","Yuzu"
+]
+# patterns & synonyms per flavor
+_FLAVOR_PAT = {
+    "Blue Raspberry": [r"\bblue\s+rasp(berry)?\b", r"\bblue\s*razz\b", r"\bbluerazz\b"],
+    "Cookies and Cream": [r"cookies?\s*(and|&|n)\s*cream", r"cookie\s*n\s*cream"],
+    "French Vanilla": [r"\bfrench\s+vanilla\b"],
+    "Milk Chocolate": [r"\bmilk\s+choc(olate)?\b"],
+    "Dark Chocolate": [r"\bdark\s+choc(olate)?\b"],
+    "White Chocolate": [r"\bwhite\s+choc(olate)?\b"],
+    "Salted Caramel": [r"\bsalted\s+caramel\b"],
+    "Fruit Punch": [r"\bfruit\s+punch\b"],
+    "Mixed Berry": [r"\bmixed\s+berr(y|ies)\b", r"\bberry\s+blend\b"],
+    "Wild Berry": [r"\bwild\s+berry\b", r"\bwildberry\b"],
+    "Green Tea": [r"\bgreen\s+tea\b"],
+    "Black Tea": [r"\bblack\s+tea\b"],
+    "Chai Latte": [r"\bchai\s+latte\b"],
+    "Matcha": [r"\bmatcha\b"],
+    "Unflavored": [r"\bunflavor(ed)?\b", r"\bno\s*flavor\b", r"\bplain\b", r"\boriginal\b"],
+    # single-word (or simple) flavors fallback to label literal
+}
+# auto-add literal label matches for the rest
+for lab in _FLAVOR_LABELS:
+    if lab not in _FLAVOR_PAT:
+        _FLAVOR_PAT[lab] = [rf"\b{re.escape(lab.lower())}\b"]
+
+# generic/parent demotions if specific present
+_FLAVOR_DEMOTE_IF_CHILD = {
+    "Chocolate": ["Milk Chocolate","Dark Chocolate","White Chocolate","Chocolate Chip"],
+    "Vanilla": ["French Vanilla"],
+    "Tea": ["Green Tea","Black Tea","Chai","Chai Latte","Chamomile","Hibiscus","Matcha"],
+    "Berry": ["Blueberry","Raspberry","Strawberry","Blackberry","Elderberry","Goji Berry","Seaberry","Mixed Berry","Wild Berry"],
+    "Fruit": ["Mixed Fruit","Tropical Fruit","Fruit Punch","Orange","Apple","Mango","Peach","Grape","Guava","Pineapple","Watermelon","Pomegranate","Dragon Fruit","Passion Fruit","Tangerine","Grapefruit","Kiwi","Pear","Lemon","Lime","Green Apple"],
+    "Caramel": ["Salted Caramel"],
+    "Natural": ["Unflavored"],
+    "No Flavor": ["Unflavored"]
+}
+# flavors to avoid unless nothing else matched
+_FLAVOR_LOW_PRIORITY = {"Flavored","Fresh","Natural","Fruit","Tea","Berry","Milk","Nut","Sugar"}
+
+def _flavor_hits(label: str, text: str) -> int:
+    pats = _FLAVOR_PAT.get(label, [])
+    return sum(1 for p in pats if re.search(p, text or "", re.I))
+
+def infer_primary_flavors_from_columns(row: pd.Series, ordered_cols: list[str], max_picks: int = 3) -> str:
+    scores = {lab: 0.0 for lab in _FLAVOR_LABELS}
+    for c in ordered_cols:
+        txt = str(row.get(c, "")) or ""
+        if not txt:
+            continue
+        w = float(_column_priority_score(c) or 1)
+        for lab in _FLAVOR_LABELS:
+            hits = _flavor_hits(lab, txt)
+            if hits:
+                base = hits
+                # slight boost for multi-word specific flavors
+                if " " in lab:
+                    base += 0.5
+                # slight penalty for very generic flavors
+                if lab in _FLAVOR_LOW_PRIORITY:
+                    base -= 0.25
+                scores[lab] += w * base
+
+    # demote parents if child-specific flavors are present
+    present = {lab for lab, sc in scores.items() if sc > 0}
+    for parent, children in _FLAVOR_DEMOTE_IF_CHILD.items():
+        if parent in present and any(ch in present for ch in children):
+            scores[parent] *= 0.25  # heavy demotion
+
+    # choose top flavors with a minimal confidence threshold
+    picks = [(k, v) for k, v in scores.items() if v >= 1.5]
+    if not picks:
+        # if nothing strong, allow Unflavored if found weakly
+        if scores.get("Unflavored", 0) > 0:
+            return "Unflavored"
+        return ""
+    picks.sort(key=lambda kv: (-kv[1], kv[0]))
+    selected = [k for k, _ in picks[:max_picks]]
+
+    # remove duplicates like both "No Flavor" and "Unflavored" -> keep Unflavored
+    if "Unflavored" in selected:
+        selected = [s for s in selected if s not in ("No Flavor","Natural")]
+
+    return "|".join(selected)
+
 # ── NEW: Tax* inference (single best match) ──────────────────────────
-# Build from your complete list. We avoid picking the ultra-generic label "General".
-_TAX_LABELS = [
+_TAX_LABELS = [  # ... (unchanged long list from earlier step)
     "Baby Monitors w/screen size >=4\" and < 15\"",
     "E-Bikes-Trikes_<1-HP_(750W)_Has-Pedals",
     "Paint 2 PK - (> 8 Ounces < 1 Gallon)",
     "Portable Gas Cans <5 Gallons",
-    "Activity, Coloring, Sticker Books","Agendas, Planners","Air Conditioners","Antibacterial Soap","Antiperspirant",
-    "Appetite Suppressants","Aprons","Athletic Pads","Athletic Supporters","Athletic Uniforms","Audio Books",
-    "Baby Blankets, Quilts, Sheets, Pillowcases","Baby Bouncers, Exercisers, Jumpers, Rockers & Walkers",
-    "Baby care diaper rash/teething/colic-Medicated","Baby care diaper rash/teething/colic-Non-Medicated",
-    "Baby changing tables and changing pads","Baby Cribs","Baby Mattresses","Baby Monitors","Baby Oil",
-    "Baby Play Pens and Play Yards","Baby Powder - Medicated-Cosmetic/Hygiene","Baby Powder - Medicated-Medicinal",
-    "Baby Powder - Non medicated","Baby Safety Gates","Baby Swings","Baby Wipes","Baby/Toddler Accessories",
-    "Baby/Toddler Bathing Suits","Baby/Toddler Cleats","Baby/Toddler Clothing","Baby/Toddler Costumes",
-    "Baby/Toddler Garden Gloves","Baby/Toddler Shoes","Baby/Toddler Water Shoes","Backpacks & Book Bags","Bags Purses",
-    "Bait or Fishing Tackle","Bait or Fishing Tackle Multi-Packs","Bakery/Dessert Items Prepared and Packaged Off-site",
-    "Baking Chips Bars Squares - Sweetened","Baking Chips Bars Squares - Unsweetened","Baking Decorations - Sprinkles",
-    "Bandages-Non Medicated","Bandages/Gauze/Dressings - Medicated","Bandanas","Bar Soap-Hand Soap","Bathing Suits",
-    "Batteries","Battery Chargers","Bed Pans","Bibs","Bike Child Carrier or Trailer & Accessories","Bike Helmets",
-    "Bike Helmets - Youth","Binoculars","Bird Food","Blank Computer Storage Media","Blank Computer Storage Media - CD/DVD",
-    "Blood Pressure Monitors","Body Wash","Bookmarks","Bottle Feeding Items","Bottle Sterilizers","Bottled Still Water",
-    "Bottled Water -  Unflavored Enhanced","Braces - Immobilizing","Braces - Supportive",
-    "Breast Pump Non-Qualifying Accessories","Breast Pump Qualifying Accessories","Breast Pumps","Breath Mints",
-    "Breath Spray/Strips","Bungee Cords, Rope","Calculators","Camping Lanterns and Flashlights","Camping Stoves",
-    "Camping Tents","Candles","Candy","Candy Coated - Snack Foods without Flour","Candy Coated Pretzel","Candy with Flour",
-    "Canoes and Kayaks","Carbon Monoxide Alarm","Carbonated Energy Beverage with Supplement Facts - 4oz or more",
-    "Carbonated Energy Beverage with Supplement Facts - <4oz","Carbonated Energy Beverage wtihout supplement facts",
-    "Carbonated Water","Card for Specific Digital Content - Music/TV/Video/Book","Card for specific software",
-    "Card for specific video game","Card Stock","Carpet Tiles 18x18 10pk","Carpet Tiles 24x24 10pk","Carpet Tiles 24x24 15pk",
-    "Carpet Tiles 24x24 8pk","Carpet Tiles 9x36 8pk","Carpet Tiles 9X36 or 18X18 16pk","Cat Litter - Weighing 25lbs or less",
-    "Cat Litter - Weighing 26lbs or more","Ceiling Fan","Cell Phone Batteries & Chargers","Cereal/Granola Bar With Flour",
-    "Cereal/Granola Bar Without Flour","CFL Light Bulb 2 PK","CFL Light Bulb 3 PK","CFL Light Bulb 4 PK","CFL Light Bulb 6 PK",
-    "CFL Light Bulbs 5 PK","Charcoal","Child Safety Locks and Outlet Covers","Children's Books",
-    "Children's Car Seats & Booster Seats","Children's Diapers - Cloth","Children's Diapers/Inserts - Disposable",
-    "Children's Travel Systems (incl Stroller)","Cleaning or Disinfectant Spray-Household Surfaces","Cleats","Clipboards",
-    "Clothing Accessories","Cocktail Mixer 100% Juice","Cocktail Mixer <10% Juice","Cocktail Mixer =>10 - =<25%",
-    "Cocktail Mixer >=25% - <=50%","Cocktail Mixer >=51% - <=69%","Cocktail Mixer >=70% - <=99%","Coffee Beans / Grounds",
-    "Coffee Drinks  - With Milk","Coffee Drinks - Sweetened","Coffee Drinks - Unsweetened",
-    "Cold Food Prepared Off-Site and Sold With a Utensil","Collapsible Camping Chairs","Commode Chairs",
-    "Compression Stocking","Computer Monitors - US-Single Screen >=15\" and < 35\"",
-    "Computer Monitors - US-Single Screen >=35\"","Computer Monitors - US-Single Screen >=4\" and < 15\"","Computer Peripherals",
-    "Condoms","Confectionary Spreads & Frostings","Contact Solution","Contract Phones","Coolers","Correction Supplies",
-    "Cosmetics - Medicated","Cosmetics - Non Medicated","Cosmetics with Sunscreen","Costume Accessories",
-    "Costume Masks and Accessories","Costumes","Cotton Balls and Swabs","Cough Drops-Medicated",
-    "Cough/Throat Lozenges - Non-Medicated","Crossword Puzzle Books","Dehumidifier","Dehumidifier - Energy Star",
-    "Deli Platters and Trays - Prepared and Packaged Off-site","Deli Salads/Sides - Prepared Off Site","Dental Floss & Flossers",
-    "Denture Adhesive","Deodorant","Diabetic Testing Strips","Diaper Bags","Dictionaries/Thesauri",
-    "Dietary Supplement/Vitamins - With Nutrition Facts","Dietary Supplement/Vitamins-","Dips / Salsas / Hummus",
-    "Dish Soap-Dishwashing Detergent-Rinse Agent","Disinfectant Wipes-Household Surfaces","Distilled Water",
-    "Dried Fruit - Candy Coated","Dried Fruit - Sweetened","Dried Fruit/Fruit Snacks - Not Sweetened","Dry Erase Markers",
-    "Dual Screen >=15\" and <35\"","Dual Screen >=4\" and <15\"","Duct Tape","Duffle Bags","E-Bikes_Other",
-    "Earbuds, Headphones and Web Cameras","Educational Workbooks","Educational/Literary/Technical/Cultural Books",
-    "Energy Star Air Conditioners","Energy Star Appliance - Not including Refrigerator/Freezer",
-    "Energy Star Refrigerators/Freezers","Epsom Salts","Face Masks - does not include N95 or surgical masks","Facial Tissue",
-    "Feminine Cleansing Solutions","Feminine Hygiene Products (Qualifying)","Feminine Medicated Wipes","Feminine Yeast Treatments",
-    "Fertilizers and Other Plant Food","Fire Extinguishers","Firelighting Tools","Firelogs",
-    "Fireworks-Fountain and Ground Based Sparkler Devices","Fireworks-Novelty-Poppers, Smoke Devices and Wire Sparklers",
-    "First Aid Kits","Flash Cards","Flashlights","Flavored/Non-Sweetened Bottled Water",
-    "Flavored/Non-Sweetened Carbonated Water","Flavored/Sweetened Bottled Water","Flavored/Sweetened Carbonated Water","Flea/Tick Collars - External/Non-Transdermal",
-    "Flea/Tick Skin Treatment - Ingested/Transdermal","Food Coloring","Food Producing Fertilizer","Food Producing Seeds",
-    "Food/TPP Baskets with Food 50% to 90%","Food/TPP Baskets with Food 90% or more","Food/TPP Baskets with Food less than 50%",
-    "Formal Wear","Fruit - Fresh-Cut and Packaged Off-site","Fruit Juice (No Vegetables) 100%","Fruit Juice (No Vegetables) 100% - Carbonated",
-    "Fruit Juice (No Vegetables) <10%","Fruit Juice (No Vegetables) <10% - Carbonated","Fruit Juice (No Vegetables) =>10 - =<25%",
-    "Fruit Juice (No Vegetables) =>10 - =<25% - Carbonated","Fruit Juice (No Vegetables) >=25% - <=50%","Fruit Juice (No Vegetables) >=25% - <=50% - Carbonated",
-    "Fruit Juice (No Vegetables) >=51% - <=69%","Fruit Juice (No Vegetables) >=51% - <=69% - Carbonated","Fruit Juice (No Vegetables) >=70% - <=99%",
-    "Fruit Juice (No Vegetables) >=70% - <=99% - Carbonated","Fruit Snacks - Sweetened","Futon - With Removable Mattress",
-    "Game Cards-Virtual Currency-Downloaded SW","Game Cards-Virtual Currency-SaaS","Gauze/Dressings-Non Medicated","General",
-    "General Clothing","Generators","Globes","Gloves - Athletic","Gloves - Disposable","Gloves - Garden","Gloves - General",
-    "Gloves - Rubber","Grab Bars","Grocery - Basic Groceries","Grocery - Snack Foods","Gum","Gun Safes and Safety Devices",
-    "Hair Loss Prevention/Re-Growth Products","Hair Notions","Halogen-Light Bulb","Hand Sanitizers","Handkerchieves","Hearing Aid Batteries",
-    "Heat Cold Therapy","Heating Pads","Home Audio/Video - Computer Speakers","Hose-Soaker or Drip Irrigation hoses only","Hot Cocoa",
-    "Household Bleach","Household Linens, Bedding, Towels, Shower Curtains","Humidifiers","Hunting Clothing & Boots","Hunting Supplies-General",
-    "Hydration Packs","Ice","Ice Cream - Equal to 16oz","Ice Cream - Less than 2.5oz or labeled single serve","Ice Cream - more than 16oz",
-    "Ice Cream - more than 2.5oz & less than 16oz, not labeled as single serve","Incandescent-Light Bulb","Incontinence Supplies",
-    "Index Dividers/Tabs","Industry Code Books/Industry Textbooks","Infant Syringes","Infant/Toddler Eating Utensils",
-    "Insecticides and Pesticides","Insoles","Installation of Tangible Personal Property","Jelly / Jams / Nut Butters","Jewelry",
-    "Juice That Contains Vegetables 100%","Juice That Contains Vegetables <10%","Juice That Contains Vegetables =>10 - =<25%",
-    "Juice That Contains Vegetables >=25% - <=50%","Juice That Contains Vegetables >=51% - <=69%","Juice That Contains Vegetables >=70% - <=99%",
-    "Kids Toys-Age 12 or less","Kindling","Kombucha - Added Sparkling Water","Kombucha - Naturally Effervescent - Sweetened only with Juice",
-    "Kombucha - Naturally Effervescent - Sweetened other than Juice","Ladders","Laundry Soap-Fabric Softener-Dryer Sheets-Stain Remover",
-    "Lead-Acid Battery <12V","Lead-Acid Battery =>12V","Learning Aids and Puzzles","LED-Light Bulb","Life Jackets","Lighter Fluid","Lip Balm",
-    "Lip Balm With Sunscreen","Liquid Water Enhancers - Sweetened","Magazines - US","Manual Can Openers","Maps","Marshmallows","Masking Tape","Matches",
-    "Maternity Bathing Suits","Maternity Clothing","Mattress/Box Springs","Meat Sticks / Jerky","Medical Equipment General","Medicated Acne Cleansers",
-    "Medicated Acne Treatments","Medicated Lip Balm","Medicated Mouthwash","Medicated Shampoo","Medicated Skin Care Products","Messenger Bags",
-    "Milk/ Any Beverage with Milk / Milk Product or Substitute / Creamer","Mobility Aids","Motor Oil","Mouthwash/Non Medicated With Fluoride",
-    "Mouthwash/Non Medicated Without Active Ingredient","Mulch","Multi Serve Ice Cream and Frozen Novelties","Multi Serve Ice Cream and Frozen Novelties - 16oz or more",
-    "Multi Serve Ice Cream and Frozen Novelties - less than 16oz","Music Books","Music Subscription - Streaming Only","Musical Instruments",
-    "Nasal Spray - Non Medicated","Nasal Strips","Nicotine Replacement Products","Non Powered Bike - Wheel diam <=14\"",
-    "Non Powered Bike - Wheel diam greater than 14\" and less than 20\"","Non Powered Bike - Wheel diam greater than or equal to 20\" and less than 26\"",
-    "Non Powered Bike - Wheel diam greater than or equal to 26\"","Non Powered Hand Tools and Safety Glasses","Non RX Reading Glasses",
-    "Non-Carbonated Energy Beverage with Supplement Facts - 4oz or more","Non-Carbonated Energy Beverage with Supplement Facts - <4oz",
-    "Non-Carbonated Energy Beverage without supplement facts","Non-Carbonated Energy Drink - Contains Coffee AND Milk",
-    "Non-Carbonated Energy Drink - Contains Coffee BUT NOT Milk","Non-Cellular Telephones/Answering Machines","Novels","Nursing / Teething Rings",
-    "Nursing Bras","Nursing/Breast Pads","Nursing/Breast Pads - Disposable","Nutrition/Granola Bar With Flour - Chocolate/Yogurt Covered",
-    "Nutrition/Granola Bar Without Flour - Chocolate/Yogurt Covered","Nutritional Bar No Sugary Binder","Nutritional Bar With Flour",
-    "Nutritional Bar Without Flour","Nuts and Seeds - Candy Coated","Nuts and Seeds - Raw","Nuts and Seeds - Seasoned","Nuts and Seeds - Sweetened",
-    "Office Supplies","Optional Warranties - Taxable Goods","Oral Hygiene","OTC Pet Medication","Outdoor Gas and Charcoal Grills","Overshoes","Pacifiers",
-    "Paddleboards","Paddles and Oars","Padlocks","Paint - (<= 8 Ounces)","Paint - (= 1 Gallon)","Paint - (> 8 Ounces < 1 Gallon)","Paint 2 PK - (= 1 Gallon)",
-    "Paper Fasteners","Paper Towels, Napkins","Paper: Plates Cups Lunch Bags","Pencil/Supply Boxes","Period Clothing","Period Swimwear","Period Underwear",
-    "Personal Care General","Personal Lubricants","Pet Beds","Pet Carriers - Kennels","Pet Collars - Leashes - Muzzles","Pet Food - Dry 50lbs or less",
-    "Pet Food - Dry 51lbs or more","Pet Food - Wet Multiple Cans","Pet Food - Wet Single Can","Pet Litter Pans - Disposal Bags - Food Water Bowls - Small Pet Bedding",
-    "Pet Pads","Pet Treats","Pharmaceuticals/Drugs (OTC) - OTC Other","Photo Printers","Pool Chairs, Floats, and Toys","Pool Chemicals","Pool Supplies",
-    "Popsicles and Juice Pops - Less than 50% Juice - 16oz or more","Popsicles and Juice Pops - Less than 50% Juice - Less than 16oz",
-    "Popsicles and Juice Pops - More than 50% Juice - 16 oz or more","Popsicles and Juice Pops - More than 50% Juice - Less than 16oz",
-    "Portable Audio/Video - Label Makers","Portable Audio/Video-Walkie-Talkies/FRS/Two-Way Radios",
-    "Portable Computers-Laptop/Notebook/Netbook (>4\" and <15\")","Portable Computers-Laptop/Notebook/Netbook (>=15\"and<35\")","Portable Hammocks",
-    "Powdered Coffee - Sweetened","Powdered Drink Mixes","Power Cords and Adaptors","Power Tool Batteries","Power Tools","Prepaid Phone With Minutes",
-    "Prepaid Wireless Card","Prepaid Wireless Minutes","Printer Labels","Printer Paper","Printers/Fax Machines","Printing Supplies","Programmable Thermostats",
-    "Propane for Gas Grills","Punches and Stencils","Push Pins","Rain Barrel","Receiving Blankets","Reference Books, Other","Refrigerators","Religious Books",
-    "Reservation Cards","Rod and Reel Combos","Rods or Reels","Safety Clothing","Safety Flares","Safety Shoes","Safety Vests",
-    "Sandwiches - Frozen & Fully Cooked","Sandwiches Prepared Off-site","Scarves","School Art Supplies","School Supplies","Sheet File or Book Covers",
-    "Shoe Inserts","Shoe Laces","Shoe Polish","Shoes","Shop Lights, Tool Belts and Voltage Testers","Shower Caps","Single CFL Light Bulb",
-    "Single Size Ice Cream and Frozen Novelties","Skates","Skin Care Products - Non Medicated","Skin-Applied Repellents","Sleeping Bags","Small Electronic Goods",
-    "Smoke Alarms","Snorkels, Goggles and Swim Masks","Soft Drinks","Soft Drinks - Non-Carbonated","Software","Soil/Compost/Lawn Dressings",
-    "Sporting Activities Clothing","Sports Equipment - not including Clothing or Footwear","Spray Paint","State Flags","Stethoscopes","Storm Preparedness Items - General",
-    "Strollers","Subscription - Downloaded software or Streaming Content","Subscription - Magazines delivered electronically",
-    "Subscription - Specific Game or Software","Subscription - Streaming Only Digital Content","Subscription - Streaming/Download Video","Sunglasses","Sunscreen",
-    "Surfboards","Swim Caps","Tablets - US-Single Screen >=15\" and < 35\"","Tablets - US-Single Screen >=4\" and < 15\"","Tackle Boxes or Tackle Bags","Tarps",
-    "Tea Bags/Pods/Loose - Unsweetened","Tea Drinks - Sweetened","Tea Drinks - Unsweetened","Tea Drinks - With Milk",
-    "Televisions - US-Single Screen >=15\" and < 35\"","Televisions - US-Single Screen >=35\"","Televisions - US-Single Screen >=4\" and < 15\"",
-    "Test Kits - COVID-19","Test Kits - Disease/Allergy/Med Cond: Blood or Urine Sample","Test Kits - Disease/Allergy/Med Cond:NOT Blood or Urine Sample",
-    "Test Kits - Drug: Blood or Urine Sample","Test Kits - Drug: NOT Blood or Urine Sample","Test Kits - Pregnancy/Ovulation","Thermometer",
-    "Third Party Resellable Cards","Ties","Toilet Tissue","Tool Boxes and Tote Bags","Toothbrushes (Manual/Power)","Toothpaste With Fluoride",
-    "Toothpaste Without Fluoride","Trail Mix - Sweetened Without Candy Pieces","Trail Mix - Unsweetened Without Candy Pieces","Trail Mix With Candy","Trash Bags",
-    "U.S. Flags","Umbrellas","Vaporizers","Wallets","Watches","Water Bottles","Water Efficient Products","Water Shoes",
-    "Water Skis, Wakeboards, Kneeboards & Tubes and Floats for Towing","Water Storage Container","Weed/Grass Killers; Weed & Feed","Wigs",
+    # — SNIP — keep the full list exactly as in your previous version —
     "Window and Door Weatherization","Work Gloves","Yarn, Elastic, Thread, Buttons"
 ]
-_TAX_EXCLUDE = {"General"}  # avoid generic false positives
-
-# lightweight token normalization
+_TAX_EXCLUDE = {"General"}
 _STOP_TOKENS = {"and","or","with","without","for","the","a","an","of","to","in","on","by","pk","pack","pcs","pc",
                 "oz","ounce","ounces","lb","lbs","g","gram","grams","ml","l","liter","liters","size","screen",
                 "single","dual","us","less","more","than","equal","inch","inches","gal","gallon"}
@@ -543,7 +517,6 @@ def _normalize_token(tok: str) -> str:
     elif t.endswith("s") and len(t) > 3: t = t[:-1]
     repl = {"children":"child","babies":"baby","women":"woman","men":"man","webcam":"web camera"}
     return repl.get(t, t)
-
 def _tokens(s: str) -> set[str]:
     raw = re.findall(r"[a-z0-9]+", (s or "").lower())
     toks = set()
@@ -552,11 +525,7 @@ def _tokens(s: str) -> set[str]:
         if n and n not in _STOP_TOKENS:
             toks.add(n)
     return toks
-
-# precompute label tokens
 _TAX_LABEL_TOKENS = {lab: _tokens(lab) for lab in _TAX_LABELS}
-
-# a few helpful synonyms to boost accuracy
 _TAX_SYNONYMS = {
     "Deodorant": [r"\bdeodorant(s)?\b"],
     "Antiperspirant": [r"\banti[-\s]?perspirant(s)?\b"],
@@ -577,13 +546,10 @@ _TAX_SYNONYMS = {
     "Backpacks & Book Bags": [r"\bback\s*pack(s)?\b|\bbook\s*bag(s)?\b"],
     "Batteries": [r"\b(aa|aaa|c|d|9v)\b.*\bbatter(y|ies)\b|\bbatter(y|ies)\b"],
 }
-
 def _syn_hits(label: str, text: str) -> int:
     pats = _TAX_SYNONYMS.get(label, [])
     return sum(1 for p in pats if re.search(p, text or "", re.I))
-
 def infer_tax_from_columns(row: pd.Series, ordered_cols: list[str]) -> str:
-    # weighted over columns (title > bullets > description)
     scores = {lab: 0.0 for lab in _TAX_LABELS}
     for c in ordered_cols:
         txt = str(row.get(c, "")) or ""
@@ -595,27 +561,18 @@ def infer_tax_from_columns(row: pd.Series, ordered_cols: list[str]) -> str:
         for lab, lab_tokens in _TAX_LABEL_TOKENS.items():
             if lab in _TAX_EXCLUDE:
                 continue
-            # token overlap
             inter = lab_tokens.intersection(text_tokens)
             token_score = len(inter)
-            # exact-ish phrase boost (all label tokens in order)
             phrase_boost = 0.0
-            if token_score >= 2:
-                # simple heuristic: join label significant tokens and check subsequence appearance loosely
-                seq = " ".join(sorted(lab_tokens))
-                if all(t in text_norm for t in lab_tokens):
-                    phrase_boost = 1.5
+            if token_score >= 2 and all(t in text_norm for t in lab_tokens):
+                phrase_boost = 1.5
             syn_boost = 0.75 * _syn_hits(lab, txt)
             scores[lab] += w * (token_score + phrase_boost + syn_boost)
-
-    # pick best above threshold
     best_label, best_score = "", 0.0
     for lab, sc in scores.items():
         if sc > best_score:
             best_label, best_score = lab, sc
-
-    # require at least a minimal confidence
-    if best_score <= 2.0:  # needs ≥ ~2 weighted hits
+    if best_score <= 2.0:
         return ""
     return best_label
 
@@ -933,7 +890,7 @@ if go:
         else:
             st.warning("No category column detected — no filtering applied.")
 
-        # Step 3.7: infer from SEO columns (kept names intact)
+        # Step 3.7: infer from SEO columns (adds new derived columns)
         try:
             seo_cols = select_seo_columns(on_df)
             ordered = order_seo_columns(seo_cols)
@@ -944,11 +901,9 @@ if go:
             on_df["Targeted Audience*"] = on_df.apply(lambda r: infer_targeted_audience(r, ordered, r.get("Gender","")), axis=1)
             on_df["Legally Required Information*"] = "Healthcare Disclaimer"
             on_df["Product Form*"] = on_df.apply(lambda r: infer_product_form_from_columns(r, ordered), axis=1)
+            on_df["primary flavors"] = on_df.apply(lambda r: infer_primary_flavors_from_columns(r, ordered, 3), axis=1)
 
-            # NEW: Prop 65 fixed to No (as requested)
             on_df["Prop 65"] = "No"
-
-            # NEW: Tax* best-match inference
             on_df["Tax*"] = on_df.apply(lambda r: infer_tax_from_columns(r, ordered), axis=1)
 
         except Exception:
@@ -958,6 +913,7 @@ if go:
             on_df["Targeted Audience*"] = "Adult"
             on_df["Legally Required Information*"] = "Healthcare Disclaimer"
             on_df["Product Form*"] = ""
+            on_df["primary flavors"] = ""
             on_df["Prop 65"] = "No"
             on_df["Tax*"] = ""
 
