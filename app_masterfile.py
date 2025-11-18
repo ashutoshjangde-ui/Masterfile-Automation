@@ -102,7 +102,6 @@ SEO_ALIASES = {
     "bullet_point4": ["Bullet point 4","bullet_point4", "Bullet Feature 4", "bullet point 4", "bullet_point4 - en-US", "Key Features #4 - en-US"],
     "bullet_point5": ["Bullet point 5","bullet_point5", "Bullet Feature 5", "bullet point 5", "bullet_point5 - en-US", "Key Features #5 - en-US"],
 }
-
 def select_seo_columns(df: pd.DataFrame) -> list[str]:
     header_lookup = {norm(c): c for c in df.columns}
     picks = []
@@ -116,17 +115,14 @@ def select_seo_columns(df: pd.DataFrame) -> list[str]:
     if picks: return picks
     heur = [c for c in df.columns if any(k in norm(c) for k in ["title","product name","description","bullet","feature","name"])]
     return heur if heur else list(df.columns)
-
 def _column_priority_score(col_name: str) -> int:
     n = norm(col_name)
     if "title" in n or "product name" in n: return 3
     if "bullet" in n or "feature" in n:     return 2
     if "description" in n:                   return 1
     return 0
-
 def order_seo_columns(cols: list[str]) -> list[str]:
     return sorted(cols, key=_column_priority_score, reverse=True)
-
 def infer_gender_from_columns(row: pd.Series, ordered_cols: list[str]) -> str:
     for c in ordered_cols:
         t = str(row.get(c, ""))
@@ -144,14 +140,16 @@ def infer_gender_from_columns(row: pd.Series, ordered_cols: list[str]) -> str:
     if any_m: return "Men"
     return "Gender Neutral"
 
-# ── Subtype (multi) ─────────────────────────────────────────────────
-# values (max 3; '|' delimiter)
+# ── Health & Beauty Subtype (multi: max 3, '|' delimiter) ────────────
 SUBTYPE_VALUES = [
     "Collagen","Protein Powder","Multivitamins",
     "Vitamin A","Vitamin B","Vitamin C","Vitamin D","Vitamin E","Vitamin K"
 ]
 _COLLAGEN_RX = re.compile(r"\bcollagen\b", re.I)
-_PROTEIN_POWDER_RX = re.compile(r"(\bprotein\s+powder\b|\bwhey\b|\bcasein\b|\bprotein\s+isolate\b|\bprotein\s+concentrate\b|\bpea\s+protein\b|\bsoy\s+protein\b|\brice\s+protein\b|\bprotein\s+blend\b)", re.I)
+_PROTEIN_POWDER_RX = re.compile(
+    r"(\bprotein\s+powder\b|\bwhey\b|\bcasein\b|\bprotein\s+isolate\b|\bprotein\s+concentrate\b|\bpea\s+protein\b|\bsoy\s+protein\b|\brice\s+protein\b|\bprotein\s+blend\b)",
+    re.I
+)
 _EXCLUDE_NON_POWDER = re.compile(r"\b(protein\s+bar|protein\s+shake|ready[-\s]?to[-\s]?drink)\b", re.I)
 _MULTI_RX   = re.compile(r"\bmulti[-\s]?vitamin(s)?\b", re.I)
 _VITA = {
@@ -162,8 +160,7 @@ _VITA = {
     "Vitamin E": [re.compile(r"\bvitamin\s*e\b", re.I), re.compile(r"\btocopherol\b", re.I)],
     "Vitamin K": [re.compile(r"\bvitamin\s*k\b", re.I), re.compile(r"\bmenaquinone\b", re.I), re.compile(r"\bphylloquinone\b", re.I)],
 }
-
-def score_text(txt: str, weight: int, scores: dict):
+def _score_subtype_text(txt: str, weight: int, scores: dict):
     if not txt: return
     if _COLLAGEN_RX.search(txt): scores["Collagen"] = scores.get("Collagen",0)+weight
     if _PROTEIN_POWDER_RX.search(txt) and not _EXCLUDE_NON_POWDER.search(txt):
@@ -172,18 +169,16 @@ def score_text(txt: str, weight: int, scores: dict):
     for k, pats in _VITA.items():
         if any(p.search(txt) for p in pats):
             scores[k] = scores.get(k,0)+weight
-
-def infer_subtypes_multi(row: pd.Series, ordered_cols: list[str], top_k: int = 3) -> str:
+def infer_hb_subtypes_multi(row: pd.Series, ordered_cols: list[str], top_k: int = 3) -> str:
     scores = {}
     for c in ordered_cols:
         w = _column_priority_score(c) or 1
-        score_text(str(row.get(c,"")), w, scores)
+        _score_subtype_text(str(row.get(c,"")), w, scores)
     if not scores: return ""
     picks = sorted(scores.items(), key=lambda x: (-x[1], x[0]))[:top_k]
     return "|".join([p[0] for p in picks])
 
-# ── Health Application (multi) ───────────────────────────────────────
-# allowed values (max 5; '|' delimiter)
+# ── Health Application (multi: max 5, '|' delimiter) ─────────────────
 HEALTH_APPS = [
 "Adrenal Health","Aging","Allergies","Anxiety","Bladder Infection","Bladder Support","Bloating",
 "Blood Clots","Blood Sugar Imbalance","Bone Health","Children's Health","Cholesterol Level Maintenance",
@@ -200,8 +195,6 @@ HEALTH_APPS = [
 "Testosterone Level","Thyroid Health","Tinnitus","Uric Acid Levels","Urinary Health","Urinary Tract Infection",
 "Vaginal Health","Vertigo","Water Retention","Weight Loss","Weight Management","Women's Health","Yeast Infection"
 ]
-
-# lightweight synonym map to boost recall
 APP_SYNONYMS = {
     "Immune System Health": [r"\bimmune\b", r"\bimmunity\b", r"\bimmune support\b"],
     "Digestive Health": [r"\bdigest(ion|ive)\b", r"\bgut health\b"],
@@ -223,7 +216,7 @@ APP_SYNONYMS = {
     "Sleep Disturbance": [r"\bsleep disturbance\b"],
     "Insomnia": [r"\binsomnia\b"],
     "Stress": [r"\bstress\b"],
-    "Anxiety": [r"\banxiety\b", r"\banxiolytic\b", r"\bcalm\b"],
+    "Anxiety": [r"\banxiety\b", r"\bcalm\b", r"\banti[-\s]?anxiety\b"],
     "Mood": [r"\bmood\b", r"\bserotonin\b"],
     "Weight Loss": [r"\bweight loss\b", r"\bfat loss\b"],
     "Weight Management": [r"\bweight management\b", r"\bmanage weight\b"],
@@ -256,10 +249,8 @@ APP_SYNONYMS = {
     "Nerve Pain": [r"\bnerve pain\b", r"\bneuropath(y|ic)\b"],
     "Gout": [r"\bgout\b"],
     "Uric Acid Levels": [r"\buric acid\b"],
-    "Eye health": [r"\beye health\b", r"\bvision\b"],
-    "Skin Health": [r"\bskin health\b"],
+    "eye health": [r"\beye health\b", r"\bvision\b"],
     "Nail Health": [r"\bnail health\b"],
-    "Hair, Skin and Nail Health": [r"\bhair skin nails\b"],
     "Dental Health": [r"\bdental\b", r"\boral health\b"],
     "Menopause": [r"\bmenopause\b"],
     "PMS": [r"\bpms\b", r"\bpremenstrual\b"],
@@ -273,14 +264,9 @@ APP_SYNONYMS = {
     "Testosterone Level": [r"\btestosterone\b"],
     "Sexual Health": [r"\bsexual health\b", r"\blibido\b"],
     "Children's Health": [r"\bchild(ren)?\b", r"\bkids?\b", r"\btoddler\b"],
-    "Women's Health": [r"\bwomen['’]s health\b"],
-    "Men's Health": [r"\bmen['’]s health\b"],
     "Aging": [r"\baging\b", r"\banti[-\s]?aging\b"],
-    "Energy": [r"\benergy\b"],
-    "Endurance": [r"\bendurance\b"],
     "Strength": [r"\bstrength\b"],
     "overall health": [r"\boverall health\b", r"\bgeneral wellness\b", r"\bdaily health\b"],
-    "Inflammation": [r"\binflammation\b"],
     "Infection": [r"\binfection\b"],
     "Fever": [r"\bfever\b"],
     "Tinnitus": [r"\btinnitus\b"],
@@ -290,41 +276,35 @@ APP_SYNONYMS = {
     "Homocysteine Levels": [r"\bhomocystein(e)?\b"],
     "Circulatory System Health": [r"\bcirculatory\b", r"\bcirculation\b"],
     "Pain Relief": [r"\bpain relief\b", r"\bpain\b"],
-    "Hydration": [r"\bhydrat(e|ion)\b"],
 }
-
 def _boosted_texts(row: pd.Series, ordered_cols: list[str]) -> list[tuple[str,int]]:
-    # Return list of (text, weight) with Title>Bullets>Description weighting 3/2/1
     out = []
     for c in ordered_cols:
         w = _column_priority_score(c) or 1
         out.append((str(row.get(c,"")), w))
     return out
-
 def infer_health_apps_multi(row: pd.Series, ordered_cols: list[str], top_k: int = 5) -> str:
     scores = {k:0 for k in HEALTH_APPS}
     texts = _boosted_texts(row, ordered_cols)
-    # build regex for canonical phrase matching too
     canon_regex = {k: re.compile(r"\b" + re.sub(r"\s+","\\s+", re.escape(k)).replace(r"\'", r"[’']") + r"\b", re.I) for k in HEALTH_APPS}
     for txt, w in texts:
         if not txt: continue
         for k, rx in canon_regex.items():
             if rx.search(txt): scores[k] += w
         for k, syns in APP_SYNONYMS.items():
-            if any(re.search(p, txt) for p in syns):
+            if any(re.search(p, txt, flags=re.I) for p in syns):
                 scores[k] += w
-    # keep only positives
     picks = [(k,v) for k,v in scores.items() if v>0]
     if not picks: return ""
     picks.sort(key=lambda x: (-x[1], x[0]))
     return "|".join([k for k,_ in picks[:top_k]])
 
-# ── Targeted Audience ────────────────────────────────────────────────
+# ── Targeted Audience* ───────────────────────────────────────────────
 _AUD_MAP = {
-    "Infant": [r"\binfant(s)?\b", r"\bnewborn(s)?\b", r"\bbaby|babies\b"],
+    "Infant": [r"\binfant(s)?\b", r"\bnewborn(s)?\b", r"\bbab(y|ies)\b"],
     "Kids": [r"\bkid(s)?\b", r"\bchild(ren)?\b", r"\btoddler(s)?\b", r"\bchildren['’]s\b"],
     "Teen": [r"\bteen(s|agers?)?\b", r"\badolescent(s)?\b", r"\byouth\b"],
-    "Adult": [r"\badult(s)?\b", r"\bmen\b", r"\bwomen\b"]  # also default if none
+    "Adult": [r"\badult(s)?\b", r"\bmen\b", r"\bwomen\b"],  # also default
 }
 def infer_audience(row: pd.Series, ordered_cols: list[str]) -> str:
     texts = " ".join(str(row.get(c,"")) for c in ordered_cols)
@@ -333,12 +313,11 @@ def infer_audience(row: pd.Series, ordered_cols: list[str]) -> str:
         if any(re.search(p, texts, flags=re.I) for p in pats):
             hits.append(label)
     if hits:
-        # if conflicting (e.g., mentions 'kids' and 'adult'), keep first by simple priority Kids>Teen>Infant>Adult? We'll just pick first found; or prefer non-Adult
         if "Infant" in hits: return "Infant"
         if "Kids" in hits: return "Kids"
         if "Teen" in hits: return "Teen"
         return "Adult"
-    return "Adult"  # default
+    return "Adult"
 
 # ── ZIP / XML helpers ────────────────────────────────────────────────
 def _find_sheet_part_path(z: zipfile.ZipFile, sheet_name: str) -> str:
@@ -358,7 +337,6 @@ def _find_sheet_part_path(z: zipfile.ZipFile, sheet_name: str) -> str:
     if target.startswith("../"): target=target[3:]
     if not target.startswith("xl/"): target="xl/"+target
     return target
-
 def _get_table_paths_for_sheet(z: zipfile.ZipFile, sheet_path: str) -> list:
     rels_path = sheet_path.replace("worksheets/","worksheets/_rels/").replace(".xml",".xml.rels")
     if rels_path not in z.namelist(): return []
@@ -370,7 +348,6 @@ def _get_table_paths_for_sheet(z: zipfile.ZipFile, sheet_path: str) -> list:
             if not target.startswith("xl/"): target="xl/"+target
             out.append(target)
     return out
-
 def _read_table_cols_count(table_xml_bytes: bytes) -> int:
     try:
         root = ET.fromstring(table_xml_bytes)
@@ -382,7 +359,6 @@ def _read_table_cols_count(table_xml_bytes: bytes) -> int:
         return max(cnt, child_count)
     except Exception:
         return 0
-
 def _union_dimension(orig_dim_ref: str, used_cols: int, last_row: int) -> str:
     try:
         _, right = orig_dim_ref.split(":", 1)
@@ -395,10 +371,8 @@ def _union_dimension(orig_dim_ref: str, used_cols: int, last_row: int) -> str:
         orig_last_col,orig_last_row=used_cols,last_row
     u_last_col=max(orig_last_col,used_cols); u_last_row=max(orig_last_row,last_row)
     return f"A1:{_col_letter(u_last_col)}{u_last_row}"
-
 def _ensure_ws_x14ac(root):
     root.set("{http://schemas.openxmlformats.org/markup-compatibility/2006}Ignorable","x14ac")
-
 def _intersects_range(a1: str, r1: int, r2: int) -> bool:
     m = re.match(r"^[A-Z]+(\d+):[A-Z]+(\d+)$", a1 or "", re.I)
     if not m: return False
@@ -469,7 +443,6 @@ def _patch_sheet_xml(sheet_xml_bytes: bytes, header_row: int, start_row: int, us
         sheetPr.attrib.pop("filterMode", None)
 
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
-
 def _patch_table_xml(table_xml_bytes: bytes, header_row: int, last_row: int, last_col_n: int) -> bytes:
     root = ET.fromstring(table_xml_bytes)
     new_ref = f"A{header_row}:{_col_letter(last_col_n)}{last_row}"
@@ -480,7 +453,6 @@ def _patch_table_xml(table_xml_bytes: bytes, header_row: int, last_row: int, las
     if tcols is not None:
         tcols.set("count", str(sum(1 for _ in tcols)))
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
-
 def _strip_calcchain_override(ct_bytes: bytes) -> bytes:
     try:
         ns="http://schemas.openxmlformats.org/package/2006/content-types"
@@ -491,7 +463,6 @@ def _strip_calcchain_override(ct_bytes: bytes) -> bytes:
         return ET.tostring(root, encoding="utf-8", xml_declaration=True)
     except Exception:
         return ct_bytes
-
 def fast_patch_template(master_bytes: bytes, sheet_name: str, header_row: int, start_row: int, used_cols: int, block_2d: list) -> bytes:
     zin = zipfile.ZipFile(io.BytesIO(master_bytes), "r")
     sheet_path = _find_sheet_part_path(zin, sheet_name)
@@ -673,13 +644,13 @@ if go:
             # Gender
             on_df["Gender"] = on_df.apply(lambda r: infer_gender_from_columns(r, ordered), axis=1)
 
-            # health and beauty subtype* (multi, up to 3)
-            on_df["health and beauty subtype*"] = on_df.apply(lambda r: infer_subtypes_multi(r, ordered, top_k=3), axis=1)
+            # health and beauty subtype* (multi, up to 3, '|' delimited)
+            on_df["health and beauty subtype*"] = on_df.apply(lambda r: infer_hb_subtypes_multi(r, ordered, top_k=3), axis=1)
 
-            # Health Application* (multi, up to 5)
+            # Health Application* (multi, up to 5, '|' delimited)
             on_df["Health Application*"] = on_df.apply(lambda r: infer_health_apps_multi(r, ordered, top_k=5), axis=1)
 
-            # Targeted Audience* (default Adult if none)
+            # Targeted Audience* (default Adult)
             on_df["Targeted Audience*"] = on_df.apply(lambda r: infer_audience(r, ordered), axis=1)
 
             # Legally Required Information* (constant)
@@ -733,7 +704,7 @@ if go:
         # Step 6: write file
         slog("⏳ **Step 6/6:** Writing final masterfile via fast XML...", 0.85)
         out_bytes = fast_patch_template(master_bytes=master_bytes, sheet_name=MASTER_TEMPLATE_SHEET,
-                                        header_row=MASTER_DISPLAY_ROW, start_row=MASTER_DATA_START_ROW,
+                                        header_row=MASTER_DISPLAY_ROW, start_row=master_SECONDARY_ROW+1 if False else  MASTER_DATA_START_ROW,
                                         used_cols=used_cols, block_2d=block)
         st.success("🎉 **Complete!**")
         final_base = safe_filename(final_name_input, fallback="target_final_masterfile")
@@ -741,7 +712,7 @@ if go:
         st.download_button("⬇️ Download Final Masterfile", data=out_bytes, file_name=final_filename,
                            mime=mime_map.get(ext, mime_map[".xlsx"]), key="dl_final_fast", use_container_width=True)
 
-        # ✅ Summary metrics
+        # Summary metrics
         st.markdown("---")
         c1, c2, c3, c4 = st.columns(4)
         with c1: st.metric("Total Rows", f"{n_rows:,}")
