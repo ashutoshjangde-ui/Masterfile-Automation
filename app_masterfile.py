@@ -147,44 +147,6 @@ def infer_gender_from_columns(row: pd.Series, ordered_cols: list[str]) -> str:
     if any_m: return "Men"
     return "Gender Neutral"
 
-# ── Health & Beauty Subtype (≤3) ─────────────────────────────────────
-_EXCLUDE_NON_POWDER = re.compile(r"\b(protein\s+bar|protein\s+cookie|protein\s+shake|ready[-\s]?to[-\s]?drink|rtd)\b", re.I)
-_HB_SUBTYPE_PATTERNS = {
-    "Collagen": [r"\bcollagen\b", r"\bcollagen\s+peptid(e|es)\b", r"\bhydrol(y|i)zed\s+collagen\b", r"\bmarine\s+collagen\b", r"\btype\s*(i|ii|iii)\b"],
-    "Protein Powder": [r"\bprotein\s+powder\b", r"\bwhey\b", r"\bcasein\b", r"\bmicellar\s+casein\b", r"\b(isolate|concentrate)\b", r"\bpea\s+protein\b", r"\bsoy\s+protein\b", r"\brice\s+protein\b", r"\bprotein\s+blend\b"],
-    "Multivitamins": [r"\bmult(i|i-)?vitamin(s)?\b", r"\bdaily\s+multivitamin(s)?\b", r"\bmulti[-\s]?vit\b"],
-    "Vitamin A": [r"\bvit(amin)?\s*a\b", r"\bretinol\b", r"\bretinyl\b"],
-    "Vitamin B": [r"\bvit(amin)?\s*b(\d{1,2})?\b", r"\bb[-\s]?complex\b", r"\bthiamin(e)?\b", r"\briboflavin\b", r"\bniacin(amide)?\b", r"\bpantothenic\b", r"\bpyridoxin(e)?\b", r"\bbiotin\b", r"\bfolate\b", r"\bfolic\s+acid\b", r"\bcobalamin\b", r"\bB-?12\b", r"\bB-?6\b", r"\bB-?3\b"],
-    "Vitamin C": [r"\bvit(amin)?\s*c\b", r"\bascorb(ic|ate)\b", r"\bester[-\s]?c\b"],
-    "Vitamin D": [r"\bvit(amin)?\s*d\b", r"\bd-?3\b", r"\bd-?2\b", r"\bcholecalciferol\b", r"\bergocalciferol\b"],
-    "Vitamin E": [r"\bvit(amin)?\s*e\b", r"\btocopherol\b", r"\btocotrienol\b"],
-    "Vitamin K": [r"\bvit(amin)?\s*k\b", r"\bk-?2\b", r"\bmk-?\s?7\b", r"\bmenaquinone\b", r"\bphylloquinone\b"],
-}
-def _hb_score_patterns(text: str, patterns: list[str]) -> int:
-    if not text: return 0
-    return sum(1 for p in patterns if re.search(p, text, re.I))
-def infer_hb_subtype_from_columns(row: pd.Series, ordered_cols: list[str]) -> str:
-    scores = {k: 0 for k in _HB_SUBTYPE_PATTERNS.keys()}
-    for c in ordered_cols:
-        txt = str(row.get(c, "")) or ""
-        if not txt:
-            continue
-        weight = _column_priority_score(c)
-        protein_powder_ok = True
-        if _EXCLUDE_NON_POWDER.search(txt) and not re.search(r"\bprotein\s+powder\b", txt, re.I):
-            protein_powder_ok = False
-        for label, pats in _HB_SUBTYPE_PATTERNS.items():
-            if label == "Protein Powder" and not protein_powder_ok:
-                continue
-            hits = _hb_score_patterns(txt, pats)
-            if hits:
-                scores[label] += weight * hits
-    picks = [(k, v) for k, v in scores.items() if v > 0]
-    if not picks:
-        return ""
-    picks.sort(key=lambda kv: (-kv[1], kv[0]))
-    return "|".join([k for k, _ in picks[:3]])
-
 # ── Health Application* (≤5) ─────────────────────────────────────────
 _HEALTH_APP_LABELS = [
     "Adrenal Health","Aging","Allergies","Anxiety","Bladder Infection","Bladder Support","Bloating","Blood Clots",
@@ -841,7 +803,7 @@ if go:
             ordered = order_seo_columns(seo_cols)
 
             on_df["Gender"] = on_df.apply(lambda r: infer_gender_from_columns(r, ordered), axis=1)
-            on_df["health and beauty subtype*"] = on_df.apply(lambda r: infer_hb_subtype_from_columns(r, ordered), axis=1)
+            # Removed: health and beauty subtype*
             on_df["Health Application*"] = on_df.apply(lambda r: infer_health_app_from_columns(r, ordered), axis=1)
             on_df["Targeted Audience*"] = on_df.apply(lambda r: infer_targeted_audience(r, ordered, r.get("Gender","")), axis=1)
             on_df["Legally Required Information*"] = "Healthcare Disclaimer"
@@ -849,11 +811,11 @@ if go:
             on_df["primary flavors"] = on_df.apply(lambda r: infer_primary_flavors_from_columns(r, ordered, 3), axis=1)
             on_df["food and drink form 1"] = on_df.apply(lambda r: infer_food_and_drink_form1_from_columns(r, ordered), axis=1)
             on_df["Prop 65"] = "No"
-            # Removed Tax* helper assignment
+            # Tax helper already removed
 
         except Exception:
             on_df["Gender"] = "Gender Neutral"
-            on_df["health and beauty subtype*"] = ""
+            # Removed fallback for health and beauty subtype*
             on_df["Health Application*"] = ""
             on_df["Targeted Audience*"] = "Adult"
             on_df["Legally Required Information*"] = "Healthcare Disclaimer"
@@ -861,14 +823,14 @@ if go:
             on_df["primary flavors"] = ""
             on_df["food and drink form 1"] = ""
             on_df["Prop 65"] = "No"
-            # Removed Tax* fallback
+            # Tax fallback already removed
 
         # refresh headers so mapping sees the new columns
         on_headers = list(on_df.columns)
 
         # ── Helper attributes we will highlight if empty ──────────────
         HELPER_HEADERS = [
-            "health and beauty subtype*",
+            # removed "health and beauty subtype*"
             "Health Application*",
             "Targeted Audience*",
             "Legally Required Information*",
