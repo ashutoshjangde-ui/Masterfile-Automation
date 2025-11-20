@@ -3,7 +3,6 @@ import json
 import re
 import time
 import zipfile
-import requests
 import xml.etree.ElementTree as ET
 from pathlib import Path
 import pandas as pd
@@ -669,15 +668,6 @@ with c1:
 with c2:
     onboarding_file = st.file_uploader("🧾 Onboarding Sheet (.xlsx)", type=["xlsx"], help="Upload the onboarding data")
 
-# AI fallback controls
-st.markdown("#### 🤖 AI Fallback (optional)")
-ai_enabled = st.checkbox("Use AI fallback to fill helper attributes when heuristics can't infer them", value=False)
-ai_key = ""
-ai_model = "gpt-4o-mini"
-if ai_enabled:
-    ai_key = st.text_input("OpenAI API key", type="password", help="Used only to call OpenAI for filling missing helper attributes.")
-    ai_model = st.text_input("Model", value="gpt-4o-mini", help="OpenAI Chat Completions model name")
-
 # ── FILTER UI (FIRST COLUMN ONLY) ────────────────────────────────────
 st.markdown("#### 🔎 Row filter (by category)")
 if onboarding_file is not None:
@@ -724,99 +714,6 @@ st.markdown("</div>", unsafe_allow_html=True)
 
 st.divider()
 go = st.button("🚀 Generate Final Masterfile", type="primary", use_container_width=True)
-
-# ── AI helpers ───────────────────────────────────────────────────────
-def _seo_blob(row: pd.Series, ordered_cols: list[str]) -> str:
-    parts = []
-    for c in ordered_cols:
-        v = str(row.get(c, "") or "").strip()
-        if v:
-            parts.append(v)
-    return "\n".join(parts)[:6000]  # keep prompt reasonable
-
-def _ai_chat(prompt: str, api_key: str, model: str) -> str | None:
-    try:
-        r = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": "You extract catalog attributes from product SEO text. Only answer with the allowed values exactly as provided."},
-                    {"role": "user", "content": prompt},
-                ],
-                "temperature": 0,
-            },
-            timeout=30,
-        )
-        if r.status_code == 200:
-            data = r.json()
-            return (data.get("choices",[{}])[0].get("message",{}).get("content","") or "").strip()
-        return None
-    except Exception:
-        return None
-
-def _parse_multi_choice(resp: str, allowed: list[str], max_choices: int, delimiter="|") -> str:
-    if not resp: return ""
-    raw = resp.strip()
-    # try JSON array
-    try:
-        arr = json.loads(raw)
-        if isinstance(arr, list):
-            cand = [str(x).strip() for x in arr]
-        else:
-            cand = [raw]
-    except Exception:
-        # split by common separators
-        cand = re.split(r"[|,\n;]+", raw)
-    allowed_l = {a.lower(): a for a in allowed}
-    picks = []
-    for c in cand:
-        k = c.strip()
-        if not k: continue
-        key = k.lower()
-        if key in allowed_l and allowed_l[key] not in picks:
-            picks.append(allowed_l[key])
-        if len(picks) >= max_choices:
-            break
-    return delimiter.join(picks)
-
-def _parse_single_choice(resp: str, allowed: list[str]) -> str:
-    if not resp: return ""
-    txt = resp.strip()
-    allowed_l = {a.lower(): a for a in allowed}
-    # exact
-    if txt.lower() in allowed_l: return allowed_l[txt.lower()]
-    # fuzzy single token
-    for token in re.split(r"[|,\n;]+", txt):
-        t = token.strip().lower()
-        if t in allowed_l:
-            return allowed_l[t]
-    return ""
-
-def ai_fill_multi(blob: str, attribute: str, allowed: list[str], max_choices: int, api_key: str, model: str) -> str:
-    prompt = (
-        f"Attribute: {attribute}\n"
-        f"Allowed values (choose up to {max_choices}): {allowed}\n"
-        f"Return exactly the chosen values separated by '|'. Return EMPTY if none apply.\n\n"
-        f"SEO TEXT:\n{blob}"
-    )
-    resp = _ai_chat(prompt, api_key, model)
-    if not resp: return ""
-    if "EMPTY" in resp.upper(): return ""
-    return _parse_multi_choice(resp, allowed, max_choices)
-
-def ai_fill_single(blob: str, attribute: str, allowed: list[str], api_key: str, model: str) -> str:
-    prompt = (
-        f"Attribute: {attribute}\n"
-        f"Allowed values (choose exactly 1): {allowed}\n"
-        f"Return exactly one value from the list. Return EMPTY if none apply.\n\n"
-        f"SEO TEXT:\n{blob}"
-    )
-    resp = _ai_chat(prompt, api_key, model)
-    if not resp: return ""
-    if "EMPTY" in resp.upper(): return ""
-    return _parse_single_choice(resp, allowed)
 
 # ── Processing ───────────────────────────────────────────────────────
 if go:
@@ -906,6 +803,7 @@ if go:
             ordered = order_seo_columns(seo_cols)
 
             on_df["Gender"] = on_df.apply(lambda r: infer_gender_from_columns(r, ordered), axis=1)
+            # Removed: health and beauty subtype*
             on_df["Health Application*"] = on_df.apply(lambda r: infer_health_app_from_columns(r, ordered), axis=1)
             on_df["Targeted Audience*"] = on_df.apply(lambda r: infer_targeted_audience(r, ordered, r.get("Gender","")), axis=1)
             on_df["Legally Required Information*"] = "Healthcare Disclaimer"
@@ -913,42 +811,11 @@ if go:
             on_df["primary flavors"] = on_df.apply(lambda r: infer_primary_flavors_from_columns(r, ordered, 3), axis=1)
             on_df["food and drink form 1"] = on_df.apply(lambda r: infer_food_and_drink_form1_from_columns(r, ordered), axis=1)
             on_df["Prop 65"] = "No"
+            # Tax helper already removed
 
-            # 🤖 AI fallback per-row (only where empty)
-            if ai_enabled and ai_key.strip():
-                slog("🤖 Running AI fallback for missing helper attributes…", 0.58)
-                for idx, row in on_df.iterrows():
-                    blob = _seo_blob(row, ordered)
-
-                    # Health Application* (≤5)
-                    if not str(row.get("Health Application*","")).strip():
-                        ai_val = ai_fill_multi(blob, "Health Application*", _HEALTH_APP_LABELS, 5, ai_key, ai_model)
-                        if ai_val: on_df.at[idx, "Health Application*"] = ai_val
-
-                    # Targeted Audience* (1 of Adult/Infant/Kids/Teen)
-                    if not str(row.get("Targeted Audience*","")).strip():
-                        ai_val = ai_fill_single(blob, "Targeted Audience*", ["Adult","Infant","Kids","Teen"], ai_key, ai_model)
-                        if ai_val: on_df.at[idx, "Targeted Audience*"] = ai_val
-
-                    # Product Form* (single; allow 'Multiple Forms')
-                    if not str(row.get("Product Form*","")).strip():
-                        pf_allowed = list(_PRODUCT_FORM_PATTERNS.keys()) + ["Multiple Forms"]
-                        ai_val = ai_fill_single(blob, "Product Form*", pf_allowed, ai_key, ai_model)
-                        if ai_val: on_df.at[idx, "Product Form*"] = ai_val
-
-                    # primary flavors (≤3)
-                    if not str(row.get("primary flavors","")).strip():
-                        ai_val = ai_fill_multi(blob, "primary flavors", _FLAVOR_LABELS, 3, ai_key, ai_model)
-                        if ai_val: on_df.at[idx, "primary flavors"] = ai_val
-
-                    # food and drink form 1 (single)
-                    if not str(row.get("food and drink form 1","")).strip():
-                        fd_allowed = list(_FD_PATTERNS.keys())
-                        ai_val = ai_fill_single(blob, "food and drink form 1", fd_allowed, ai_key, ai_model)
-                        if ai_val: on_df.at[idx, "food and drink form 1"] = ai_val
-
-        except Exception as _err:
+        except Exception:
             on_df["Gender"] = "Gender Neutral"
+            # Removed fallback for health and beauty subtype*
             on_df["Health Application*"] = ""
             on_df["Targeted Audience*"] = "Adult"
             on_df["Legally Required Information*"] = "Healthcare Disclaimer"
@@ -956,19 +823,21 @@ if go:
             on_df["primary flavors"] = ""
             on_df["food and drink form 1"] = ""
             on_df["Prop 65"] = "No"
+            # Tax fallback already removed
 
         # refresh headers so mapping sees the new columns
         on_headers = list(on_df.columns)
 
         # ── Helper attributes we will highlight if empty ──────────────
         HELPER_HEADERS = [
+            # removed "health and beauty subtype*"
             "Health Application*",
             "Targeted Audience*",
             "Legally Required Information*",
             "Product Form*",
             "primary flavors",
-            "food and drink form 1",
             "Prop 65",
+            "food and drink form 1",
         ]
         HELPER_HEADERS_NORM = {norm(h) for h in HELPER_HEADERS}
 
@@ -1027,8 +896,10 @@ if go:
         ws = wb[MASTER_TEMPLATE_SHEET]
         yellow = PatternFill(fill_type="solid", fgColor="FFFF00")
 
+        # for each data row, if helper column value empty, fill yellow
         for i in range(n_rows):
             excel_row = MASTER_DATA_START_ROW + i
+            # safety: only highlight existing helper columns within used_cols
             for col_idx in helper_cols_idx:
                 if col_idx < 1 or col_idx > used_cols:
                     continue
@@ -1041,7 +912,7 @@ if go:
         out_bio2.seek(0)
         out_bytes_final = out_bio2.getvalue()
 
-        st.success("🎉 **Complete!** (AI fallback + highlight on empty helper attributes)")
+        st.success("🎉 **Complete!** (with highlight on empty helper attributes)")
         final_base = safe_filename(final_name_input, fallback="target_final_masterfile")
         final_filename = f"{final_base}{ext}"
         st.download_button("⬇️ Download Final Masterfile", data=out_bytes_final, file_name=final_filename,
