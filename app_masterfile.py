@@ -521,85 +521,6 @@ def infer_food_and_drink_form1_from_columns(row: pd.Series, ordered_cols: list[s
     best_label, best_score = max(scores.items(), key=lambda kv: kv[1])
     return best_label if best_score > 0 else ""
 
-# ── Tax* inference (single best match) ───────────────────────────────
-_TAX_LABELS = [
-    "Baby Monitors w/screen size >=4\" and < 15\"",
-    "E-Bikes-Trikes_<1-HP_(750W)_Has-Pedals",
-    "Paint 2 PK - (> 8 Ounces < 1 Gallon)",
-    "Portable Gas Cans <5 Gallons",
-    # — SNIP — keep your full list here —
-    "Window and Door Weatherization","Work Gloves","Yarn, Elastic, Thread, Buttons"
-]
-_TAX_EXCLUDE = {"General"}
-_STOP_TOKENS = {"and","or","with","without","for","the","a","an","of","to","in","on","by","pk","pack","pcs","pc",
-                "oz","ounce","ounces","lb","lbs","g","gram","grams","ml","l","liter","liters","size","screen",
-                "single","dual","us","less","more","than","equal","inch","inches","gal","gallon"}
-def _normalize_token(tok: str) -> str:
-    t = tok.lower()
-    if t.endswith("ies"): t = t[:-3] + "y"
-    elif t.endswith("es"): t = t[:-2]
-    elif t.endswith("s") and len(t) > 3: t = t[:-1]
-    repl = {"children":"child","babies":"baby","women":"woman","men":"man","webcam":"web camera"}
-    return repl.get(t, t)
-def _tokens(s: str) -> set[str]:
-    raw = re.findall(r"[a-z0-9]+", (s or "").lower())
-    toks = set()
-    for t in raw:
-        n = _normalize_token(t)
-        if n and n not in _STOP_TOKENS:
-            toks.add(n)
-    return toks
-_TAX_LABEL_TOKENS = {lab: _tokens(lab) for lab in _TAX_LABELS}
-_TAX_SYNONYMS = {
-    "Deodorant": [r"\bdeodorant(s)?\b"],
-    "Antiperspirant": [r"\banti[-\s]?perspirant(s)?\b"],
-    "Sunscreen": [r"\bsun\s*screen\b", r"\bspf\b"],
-    "Baby Wipes": [r"\b(baby|infant)\s+wipes?\b"],
-    "Diaper Bags": [r"\bdiaper\s+bag(s)?\b"],
-    "Strollers": [r"\bstroller(s)?\b", r"\btravel\s+system(s)?\b"],
-    "Earbuds, Headphones and Web Cameras": [r"\bearbud(s)?\b", r"\bheadphone(s)?\b", r"\bheadset(s)?\b", r"\bweb\s*cam(s)?\b"],
-    "LED-Light Bulb": [r"\bled\b.*\blight\b|\bled\b.*\bbulb\b"],
-    "CFL Light Bulb 2 PK": [r"\bcfl\b.*\b(light|bulb)\b"],
-    "Incandescent-Light Bulb": [r"\bincandescent\b.*\b(light|bulb)\b"],
-    "Soft Drinks": [r"\bsoft\s+drink(s)?\b", r"\bsoda(s)?\b", r"\bpop\b"],
-    "Coffee Drinks  - With Milk": [r"\bcoffee\b.*\b(milk|latte|cappuccino)\b"],
-    "Coffee Drinks - Unsweetened": [r"\bblack\s+coffee\b"],
-    "Candy": [r"\bcandy\b|chocolate|toffee|taffy|caramel"],
-    "Gum": [r"\bgum\b|chewing\s+gum"],
-    "Water Bottles": [r"\bwater\s+bottle(s)?\b"],
-    "Backpacks & Book Bags": [r"\bback\s*pack(s)?\b|\bbook\s*bag(s)?\b"],
-    "Batteries": [r"\b(aa|aaa|c|d|9v)\b.*\bbatter(y|ies)\b|\bbatter(y|ies)\b"],
-}
-def _syn_hits(label: str, text: str) -> int:
-    pats = _TAX_SYNONYMS.get(label, [])
-    return sum(1 for p in pats if re.search(p, text or "", re.I))
-def infer_tax_from_columns(row: pd.Series, ordered_cols: list[str]) -> str:
-    scores = {lab: 0.0 for lab in _TAX_LABELS}
-    for c in ordered_cols:
-        txt = str(row.get(c, "")) or ""
-        if not txt:
-            continue
-        w = float(_column_priority_score(c) or 1)
-        text_tokens = _tokens(txt)
-        text_norm = " " + norm(txt) + " "
-        for lab, lab_tokens in _TAX_LABEL_TOKENS.items():
-            if lab in _TAX_EXCLUDE:
-                continue
-            inter = lab_tokens.intersection(text_tokens)
-            token_score = len(inter)
-            phrase_boost = 0.0
-            if token_score >= 2 and all(t in text_norm for t in lab_tokens):
-                phrase_boost = 1.5
-            syn_boost = 0.75 * _syn_hits(lab, txt)
-            scores[lab] += w * (token_score + phrase_boost + syn_boost)
-    best_label, best_score = "", 0.0
-    for lab, sc in scores.items():
-        if sc > best_score:
-            best_label, best_score = lab, sc
-    if best_score <= 2.0:
-        return ""
-    return best_label
-
 # ── ZIP / XML helpers ────────────────────────────────────────────────
 def _find_sheet_part_path(z: zipfile.ZipFile, sheet_name: str) -> str:
     wb_xml = ET.fromstring(z.read("xl/workbook.xml"))
@@ -928,7 +849,7 @@ if go:
             on_df["primary flavors"] = on_df.apply(lambda r: infer_primary_flavors_from_columns(r, ordered, 3), axis=1)
             on_df["food and drink form 1"] = on_df.apply(lambda r: infer_food_and_drink_form1_from_columns(r, ordered), axis=1)
             on_df["Prop 65"] = "No"
-            on_df["Tax*"] = on_df.apply(lambda r: infer_tax_from_columns(r, ordered), axis=1)
+            # Removed Tax* helper assignment
 
         except Exception:
             on_df["Gender"] = "Gender Neutral"
@@ -940,7 +861,7 @@ if go:
             on_df["primary flavors"] = ""
             on_df["food and drink form 1"] = ""
             on_df["Prop 65"] = "No"
-            on_df["Tax*"] = ""
+            # Removed Tax* fallback
 
         # refresh headers so mapping sees the new columns
         on_headers = list(on_df.columns)
@@ -954,7 +875,6 @@ if go:
             "Product Form*",
             "primary flavors",
             "Prop 65",
-            "Tax*",
             "food and drink form 1",
         ]
         HELPER_HEADERS_NORM = {norm(h) for h in HELPER_HEADERS}
