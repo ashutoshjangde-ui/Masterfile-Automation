@@ -1,3 +1,7 @@
+"""
+Target Masterfile Automation App
+Make sure to run this file directly: streamlit run Target_app.py
+"""
 import io
 import json
 import re
@@ -147,94 +151,6 @@ def infer_gender_from_columns(row: pd.Series, ordered_cols: list[str]) -> str:
     if any_m: return "Men"
     return "Gender Neutral"
 
-# ── Health Application* (≤5) ─────────────────────────────────────────
-_HEALTH_APP_LABELS = [
-    "Adrenal Health","Aging","Allergies","Anxiety","Bladder Infection","Bladder Support","Bloating","Blood Clots",
-    "Blood Sugar Imbalance","Bone Health","Children's Health","Cholesterol Level Maintenance","Circulatory System Health",
-    "Constipation","Dental Health","Diabetes","Diarrhea","Digestive Health","Endurance","Energy","eye health","Fertility",
-    "Fever","Gout","Hair, Skin and Nail Health","Heart Health","High Cholesterol","Homocysteine Levels","Hydration",
-    "Immune System Health","Infection","Inflammation","Insomnia","Intestinal Health","Iron Deficiency",
-    "Irritable Bowel Syndrome (IBS)","Joint Health","Joint Pain","Joint Support","Kidney Health","Lactation",
-    "Liver Health","Lymphatic Health","Memory and Brain Health","Men's Health","Menopause","Metabolism","Mood",
-    "Morning Sickness","Muscle Growth","Muscle Pain","Muscle Tension","Nail Health","Nausea","Nerve Pain",
-    "Nervous System Health","overall health","Pain Relief","PMS","Postnatal Health","Postpartum Care","Pregnancy",
-    "Premenstrual Breast Discomfort","Prenatal Health","Pressure Ulcers","Prostate Health","Respiratory Health",
-    "Seasonal Allergies","Sexual Health","Sinusitis","Skin Health","Sleep Disturbance","Sleep Support",
-    "Sports Performance","Strength","Stress","Testosterone Level","Thyroid Health","Tinnitus","Uric Acid Levels",
-    "Urinary Health","Urinary Tract Infection","Vaginal Health","Vertigo","Water Retention","Weight Loss",
-    "Weight Management","Women's Health","Yeast Infection"
-]
-def _make_base_pat(label: str) -> str:
-    s = label.lower()
-    s = s.replace("children's", r"children(?:'s)?").replace("men's", r"men(?:'s)?").replace("women's", r"women(?:'s)?")
-    s = re.sub(r"\s*\(.*?\)\s*", "", s)
-    tokens = re.split(r"[^a-z0-9]+", s.strip())
-    tokens = [re.escape(t) for t in tokens if t]
-    if not tokens:
-        return r"$^"
-    return r"\b" + r"\W+".join(tokens) + r"\b"
-_HEALTH_APP_SYNONYMS = {
-    "Digestive Health": [r"\bdigesti(ve|on)\b", r"\bgut\s+health\b"],
-    "Immune System Health": [r"\bimmune(\s+system)?\s+health\b", r"\bimmune\s+support\b", r"\bimmunity\s+support\b", r"\bboost\s+immun"],
-    "Joint Health": [r"\bjoint\s+health\b", r"\bhealthy\s+joints\b"],
-    "Joint Support": [r"\bjoint\s+support\b"],
-    "Joint Pain": [r"\bjoint\s+pain\b", r"\barthriti[cs]\b", r"\barthritic\s+pain\b"],
-    "Sleep Support": [r"\bsleep\s+support\b", r"\bbetter\s+sleep\b", r"\bpromotes\s+sleep\b", r"\bsleep\s+quality\b"],
-    "Sleep Disturbance": [r"\bsleep\s+disturbance\b", r"\btrouble\s+sleep(ing)?\b"],
-    "Insomnia": [r"\binsomnia\b"],
-    "Energy": [r"\benergy\b", r"\benergiz", r"\bpre[-\s]?workout\b"],
-    "Endurance": [r"\bendurance\b", r"\bstamina\b"],
-    "Stress": [r"\bstress\b", r"\bstress\s+relief\b", r"\bstress\s+support\b"],
-    "Anxiety": [r"\banxiety\b"],
-    "Weight Loss": [r"\bweight\s+loss\b", r"\bfat\s+loss\b", r"\bslim(ming)?\b"],
-    "Weight Management": [r"\bweight\s+management\b", r"\bmanage\s+weight\b", r"\bmaintain\s+weight\b"],
-    "Bone Health": [r"\bbone\s+health\b", r"\bbone\s+density\b", r"\bosteoporosis\b"],
-    "Heart Health": [r"\bheart\s+health\b", r"\bcardio(vascular)?\b"],
-    "Skin Health": [r"\bskin\s+health\b", r"\bhealthy\s+skin\b"],
-    "Hair, Skin and Nail Health": [r"\bhair[, ]+\s*skin\s*(and|&)?\s*nail", r"\bhair\s*skin\s*and\s*nails\b"],
-    "Memory and Brain Health": [r"\bmemory\b", r"\bbrain\s+health\b", r"\bcognit(ive|ion)\b", r"\bfocus\b", r"\bconcentration\b", r"\bnootropic\b"],
-    "Hydration": [r"\bhydrat(e|ion)\b", r"\belectrolyte(s)?\b"],
-    "Cholesterol Level Maintenance": [r"\bcholesterol\b", r"\bmaintain\s+cholesterol\b", r"\bhealthy\s+cholesterol\b"],
-    "High Cholesterol": [r"\bhigh\s+cholesterol\b"],
-    "Blood Sugar Imbalance": [r"\bblood\s+sugar\b", r"\bglucose\b", r"\bglycem(i|y)c\b"],
-    "Children's Health": [r"\b(children|kids|child)\b.*\bhealth\b", r"\bfor\s+(kids|children)\b"],
-    "Men's Health": [r"\b(men|male)\b.*\bhealth\b", r"\bfor\s+men\b"],
-    "Women's Health": [r"\b(women|female)\b.*\bhealth\b", r"\bfor\s+women\b"],
-    "Irritable Bowel Syndrome (IBS)": [r"\birritable\s+bowel\s+syndrome\b", r"\bIBS\b"],
-    "eye health": [r"\beye\s+health\b", r"\bvision\b", r"\bocular\b"],
-    "Nervous System Health": [r"\bnervous\s+system\b", r"\bneurolog(y|ical)\b"],
-    "Respiratory Health": [r"\brespiratory\b", r"\blung\b", r"\bbreath(ing)?\b"],
-    "Sports Performance": [r"\bsports?\s+performance\b", r"\bathletic\b", r"\bperformance\b"],
-    "Strength": [r"\bstrength\b", r"\bstronger\b"],
-    "Pain Relief": [r"\bpain\s+relief\b", r"\banalgesic\b"],
-    "Mood": [r"\bmood\b"],
-    "Metabolism": [r"\bmetaboli[sc]m\b"],
-}
-_HEALTH_APP_REGEX = {}
-for label in _HEALTH_APP_LABELS:
-    pats = [ _make_base_pat(label) ]
-    pats.extend(_HEALTH_APP_SYNONYMS.get(label, []))
-    _HEALTH_APP_REGEX[label] = [re.compile(p, re.I) for p in pats]
-def _health_score(text: str, comp_list) -> int:
-    if not text: return 0
-    return sum(1 for rx in comp_list if rx.search(text))
-def infer_health_app_from_columns(row: pd.Series, ordered_cols: list[str]) -> str:
-    scores = {label:0 for label in _HEALTH_APP_REGEX.keys()}
-    for c in ordered_cols:
-        txt = str(row.get(c, "")) or ""
-        if not txt: 
-            continue
-        weight = _column_priority_score(c)
-        for label, comp_list in _HEALTH_APP_REGEX.items():
-            hits = _health_score(txt, comp_list)
-            if hits:
-                scores[label] += weight * hits
-    picks = [(k, v) for k, v in scores.items() if v > 0]
-    if not picks:
-        return ""
-    picks.sort(key=lambda kv: (-kv[1], kv[0]))
-    return "|".join([k for k, _ in picks[:5]])
-
 # ── Targeted Audience* (single; default Adult) ───────────────────────
 _AUD_PAT = {
     "Infant": [r"\bbaby|babies|infant|newborn\b", r"\b0\s*[-–]?\s*12\s*(m|mos|months)\b"],
@@ -363,84 +279,6 @@ def infer_product_form_from_columns(row: pd.Series, ordered_cols: list[str]) -> 
     if len(picks) >= 2 and top_score < other_score * 1.5:
         return "Multiple Forms"
     return top_label
-
-# ── primary flavors (≤3; pipe-delimited) ────────────────────────────
-_FLAVOR_LABELS = [
-    "Acai","Almond","Apple","Banana","Berry","Black Cherry","Black Currant","Black Tea","Blackberry","Blue Raspberry",
-    "Blueberry","Brown Sugar","Brownie","Bubble Gum","Butter","Cake","Caramel","Celery","Chai","Chai Latte","Chamomile",
-    "Cherry","Chocolate","Chocolate Chip","Cinnamon","Citrus","Cocoa","Coconut","Coffee","Cookie","Cookies and Cream",
-    "Cranberry","Dark Chocolate","Donut","Dragon Fruit","Elderberry","Flavored","Flaxseed","French Vanilla","Fresh",
-    "Fruit","Fruit Punch","Garlic","Goji Berry","Grape","Grapefruit","Green Apple","Green Tea","Guava","Hibiscus","Honey",
-    "Kiwi","Lemon","Lemonade","Lime","Macadamia Nut","Mango","Maple","Marshmallow","Matcha","Melon","Milk","Milk Chocolate",
-    "Mint","Mixed Berry","Mixed Fruit","Mocha","Mushroom","Natural","No Flavor","Nut","Oatmeal","Oats","Orange","Passion Fruit",
-    "Peach","Peanut Butter","Pear","Peppermint","Pineapple","Pistachio","Pomegranate","Raspberry","Salted Caramel","Seaberry",
-    "Sour","Spicy","Spirulina","Strawberry","Sugar","Tangerine","Tea","Toffee","Tropical Fruit","Turmeric","Ube","Unflavored",
-    "Vanilla","Vegetable Blend","Watermelon","White Chocolate","Whole Wheat","Wild Berry","Yuzu"
-]
-_FLAVOR_PAT = {
-    "Blue Raspberry": [r"\bblue\s+rasp(berry)?\b", r"\bblue\s*razz\b", r"\bbluerazz\b"],
-    "Cookies and Cream": [r"cookies?\s*(and|&|n)\s*cream", r"cookie\s*n\s*cream"],
-    "French Vanilla": [r"\bfrench\s+vanilla\b"],
-    "Milk Chocolate": [r"\bmilk\s+choc(olate)?\b"],
-    "Dark Chocolate": [r"\bdark\s+choc(olate)?\b"],
-    "White Chocolate": [r"\bwhite\s+choc(olate)?\b"],
-    "Salted Caramel": [r"\bsalted\s+caramel\b"],
-    "Fruit Punch": [r"\bfruit\s+punch\b"],
-    "Mixed Berry": [r"\bmixed\s+berr(y|ies)\b", r"\bberry\s+blend\b"],
-    "Wild Berry": [r"\bwild\s+berry\b", r"\bwildberry\b"],
-    "Green Tea": [r"\bgreen\s+tea\b"],
-    "Black Tea": [r"\bblack\s+tea\b"],
-    "Chai Latte": [r"\bchai\s+latte\b"],
-    "Matcha": [r"\bmatcha\b"],
-    "Unflavored": [r"\bunflavor(ed)?\b", r"\bno\s*flavor\b", r"\bplain\b", r"\boriginal\b"],
-}
-for lab in _FLAVOR_LABELS:
-    if lab not in _FLAVOR_PAT:
-        _FLAVOR_PAT[lab] = [rf"\b{re.escape(lab.lower())}\b"]
-_FLAVOR_DEMOTE_IF_CHILD = {
-    "Chocolate": ["Milk Chocolate","Dark Chocolate","White Chocolate","Chocolate Chip"],
-    "Vanilla": ["French Vanilla"],
-    "Tea": ["Green Tea","Black Tea","Chai","Chai Latte","Chamomile","Hibiscus","Matcha"],
-    "Berry": ["Blueberry","Raspberry","Strawberry","Blackberry","Elderberry","Goji Berry","Seaberry","Mixed Berry","Wild Berry"],
-    "Fruit": ["Mixed Fruit","Tropical Fruit","Fruit Punch","Orange","Apple","Mango","Peach","Grape","Guava","Pineapple","Watermelon","Pomegranate","Dragon Fruit","Passion Fruit","Tangerine","Grapefruit","Kiwi","Pear","Lemon","Lime","Green Apple"],
-    "Caramel": ["Salted Caramel"],
-    "Natural": ["Unflavored"],
-    "No Flavor": ["Unflavored"]
-}
-_FLAVOR_LOW_PRIORITY = {"Flavored","Fresh","Natural","Fruit","Tea","Berry","Milk","Nut","Sugar"}
-def _flavor_hits(label: str, text: str) -> int:
-    pats = _FLAVOR_PAT.get(label, [])
-    return sum(1 for p in pats if re.search(p, text or "", re.I))
-def infer_primary_flavors_from_columns(row: pd.Series, ordered_cols: list[str], max_picks: int = 3) -> str:
-    scores = {lab: 0.0 for lab in _FLAVOR_LABELS}
-    for c in ordered_cols:
-        txt = str(row.get(c, "")) or ""
-        if not txt:
-            continue
-        w = float(_column_priority_score(c) or 1)
-        for lab in _FLAVOR_LABELS:
-            hits = _flavor_hits(lab, txt)
-            if hits:
-                base = hits
-                if " " in lab:
-                    base += 0.5
-                if lab in _FLAVOR_LOW_PRIORITY:
-                    base -= 0.25
-                scores[lab] += w * base
-    present = {lab for lab, sc in scores.items() if sc > 0}
-    for parent, children in _FLAVOR_DEMOTE_IF_CHILD.items():
-        if parent in present and any(ch in present for ch in children):
-            scores[parent] *= 0.25
-    picks = [(k, v) for k, v in scores.items() if v >= 1.5]
-    if not picks:
-        if scores.get("Unflavored", 0) > 0:
-            return "Unflavored"
-        return ""
-    picks.sort(key=lambda kv: (-kv[1], kv[0]))
-    selected = [k for k, _ in picks[:max_picks]]
-    if "Unflavored" in selected:
-        selected = [s for s in selected if s not in ("No Flavor","Natural")]
-    return "|".join(selected)
 
 # ── Food & Drink Form 1 (single) ─────────────────────────────────────
 _FD_LIQUID_EXCLUDE = re.compile(
@@ -575,7 +413,7 @@ def _patch_sheet_xml(sheet_xml_bytes: bytes, header_row: int, start_row: int, us
         src_row = block_2d[i]
         row_el = ET.Element(f"{{{XL_NS_MAIN}}}row", r=str(r))
         row_el.set("spans", row_span)
-        row_el.set("{http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac}dyDescent", "0.25")
+        row_el.set("{http://www.w3.org/2001/XMLSchema-instance}dyDescent", "0.25")
         for j in range(used_cols_final):
             val = src_row[j] if j < len(src_row) else ""
             txt = sanitize_xml_text(val).strip() if val else ""
@@ -668,7 +506,12 @@ with c1:
 with c2:
     onboarding_file = st.file_uploader("🧾 Onboarding Sheet (.xlsx)", type=["xlsx"], help="Upload the onboarding data")
 
+st.markdown("</div>", unsafe_allow_html=True)
+
 # ── FILTER UI (FIRST COLUMN ONLY) ────────────────────────────────────
+# IMPORTANT: This section allows filtering rows by the first column of the onboarding file
+# Make sure this section is included when pushing to GitHub
+st.markdown("<div class='section'>", unsafe_allow_html=True)
 st.markdown("#### 🔎 Row filter (by category)")
 if onboarding_file is not None:
     try:
@@ -688,12 +531,15 @@ if onboarding_file is not None:
             st.session_state.cat_values = chosen
         else:
             st.info("No columns found in the first sheet of onboarding.")
-    except Exception:
+    except Exception as e:
+        st.warning(f"Error reading onboarding file: {str(e)}")
         st.info("Upload a valid onboarding file to enable category filtering.")
 else:
     st.info("Upload the onboarding file to enable category filtering.")
+st.markdown("</div>", unsafe_allow_html=True)
 
 # ── Mapping JSON / Output UI ─────────────────────────────────────────
+st.markdown("<div class='section'>", unsafe_allow_html=True)
 st.markdown("#### 🔗 Mapping JSON")
 st.caption("Define how onboarding columns map to masterfile headers")
 
@@ -804,11 +650,9 @@ if go:
 
             on_df["Gender"] = on_df.apply(lambda r: infer_gender_from_columns(r, ordered), axis=1)
             # Removed: health and beauty subtype*
-            on_df["Health Application*"] = on_df.apply(lambda r: infer_health_app_from_columns(r, ordered), axis=1)
             on_df["Targeted Audience*"] = on_df.apply(lambda r: infer_targeted_audience(r, ordered, r.get("Gender","")), axis=1)
             on_df["Legally Required Information*"] = "Healthcare Disclaimer"
             on_df["Product Form*"] = on_df.apply(lambda r: infer_product_form_from_columns(r, ordered), axis=1)
-            on_df["primary flavors"] = on_df.apply(lambda r: infer_primary_flavors_from_columns(r, ordered, 3), axis=1)
             on_df["food and drink form 1"] = on_df.apply(lambda r: infer_food_and_drink_form1_from_columns(r, ordered), axis=1)
             on_df["Prop 65"] = "No"
             # Tax helper already removed
@@ -816,11 +660,9 @@ if go:
         except Exception:
             on_df["Gender"] = "Gender Neutral"
             # Removed fallback for health and beauty subtype*
-            on_df["Health Application*"] = ""
             on_df["Targeted Audience*"] = "Adult"
             on_df["Legally Required Information*"] = "Healthcare Disclaimer"
             on_df["Product Form*"] = ""
-            on_df["primary flavors"] = ""
             on_df["food and drink form 1"] = ""
             on_df["Prop 65"] = "No"
             # Tax fallback already removed
@@ -831,11 +673,9 @@ if go:
         # ── Helper attributes we will highlight if empty ──────────────
         HELPER_HEADERS = [
             # removed "health and beauty subtype*"
-            "Health Application*",
             "Targeted Audience*",
             "Legally Required Information*",
             "Product Form*",
-            "primary flavors",
             "Prop 65",
             "food and drink form 1",
         ]
